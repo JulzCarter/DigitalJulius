@@ -27,6 +27,7 @@ from digitaljulius.auth import (
 from digitaljulius.budget import best_available_model, record_call
 from digitaljulius.commands import command_names, dispatch
 from digitaljulius.config import load_config, save_config
+from digitaljulius.knowledge import auto_distill, ensure_kb
 from digitaljulius.orchestrator import run_prompt
 from digitaljulius.state import new_session, turn_from_runresult
 
@@ -141,6 +142,28 @@ def _interactive_loop(cfg: dict, cwd: Path) -> None:
         _render_run(line, run_result)
         session.append(turn_from_runresult(line, run_result))
 
+        # Self-improvement: distill a durable lesson from this turn.
+        if cfg.get("general", {}).get("auto_learn", True):
+            try:
+                entry = auto_distill(
+                    prompt=line,
+                    tier=run_result.classification.tier.value,
+                    chosen_agent=run_result.chosen_agent or "",
+                    chosen_model=run_result.chosen_model or "",
+                    output=run_result.final_text or "",
+                    approved=(
+                        run_result.output_verdict.approved
+                        if run_result.output_verdict else None
+                    ),
+                    cfg=cfg,
+                    cwd=cwd,
+                )
+                if entry:
+                    ui.info(f"learned ({entry.kind}): {entry.text}")
+            except Exception as e:
+                # Never let learning kill the loop.
+                ui.warn(f"distill skipped: {e}")
+
     ui.info(f"session log: {session.log_path()}")
 
 
@@ -169,6 +192,8 @@ def _run(
     cfg = load_config()
     save_config(cfg)  # writes defaults on first run
     cfg["general"]["yolo_default"] = yolo
+    cfg["general"].setdefault("auto_learn", True)
+    ensure_kb()
     work_cwd = (cwd or Path.cwd()).resolve()
 
     if not first_run_completed():

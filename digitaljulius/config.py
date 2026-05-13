@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
         "yolo_default": True,
         "approver_mode": "advisory",  # "advisory" or "gatekeeper"
         "auto_spawn_twin": False,     # ask before twin-instance
+        "auto_learn": True,           # distil a lesson after each non-SIMPLE turn
     },
     "agents": {
         "claude": {

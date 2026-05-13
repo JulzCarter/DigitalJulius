@@ -21,6 +21,7 @@ from digitaljulius.approver import Verdict, review_output, review_plan
 from digitaljulius.budget import best_available_model, record_call
 from digitaljulius.complexity import Classification, Tier, classify
 from digitaljulius.consensus import ConsensusResult, run_consensus, synthesise
+from digitaljulius.knowledge import context_for_prompt
 
 
 # A confirm callback returns True to proceed, False to skip.
@@ -102,13 +103,21 @@ def run_prompt(
     tier = classification.tier
     tags = classification.suggested_tags or ["default"]
 
+    # Inject accumulated knowledge for non-SIMPLE prompts so the orchestrator
+    # self-improves across sessions. Cheap turns skip this to save tokens.
+    enriched_prompt = prompt
+    if tier != Tier.SIMPLE:
+        kb = context_for_prompt()
+        if kb:
+            enriched_prompt = f"{kb}\n\n---\n\n{prompt}"
+
     # ---- SIMPLE: one agent, no review --------------------------------------
     if tier == Tier.SIMPLE:
         agents = _pick_agents_for(tags, cfg, max_n=1)
         if not agents:
             result.skipped_reason = "no authenticated agent available"
             return result
-        resp = _single_agent_run(prompt, agents[0], cfg, cwd)
+        resp = _single_agent_run(enriched_prompt, agents[0], cfg, cwd)
         result.responses.append(resp)
         result.final_text = resp.text
         result.chosen_agent = resp.agent
@@ -121,7 +130,7 @@ def run_prompt(
         if not agents:
             result.skipped_reason = "no authenticated agent available"
             return result
-        resp = _single_agent_run(prompt, agents[0], cfg, cwd)
+        resp = _single_agent_run(enriched_prompt, agents[0], cfg, cwd)
         result.responses.append(resp)
         result.final_text = resp.text
         result.chosen_agent = resp.agent
@@ -164,9 +173,9 @@ def run_prompt(
             result.skipped_reason = "plan blocked by approver"
             return result
 
-    consensus = run_consensus(prompt, cfg, agents, cwd=cwd)
+    consensus = run_consensus(enriched_prompt, cfg, agents, cwd=cwd)
     if twin:
-        twin_result = run_consensus(prompt, cfg, agents, cwd=cwd)
+        twin_result = run_consensus(enriched_prompt, cfg, agents, cwd=cwd)
         consensus.responses.extend(twin_result.responses)
 
     result.consensus = consensus

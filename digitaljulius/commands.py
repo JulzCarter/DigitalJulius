@@ -11,6 +11,8 @@ from digitaljulius.auth import instructions_for, probe
 from digitaljulius.budget import best_available_model
 from digitaljulius.complexity import Tier, classify
 from digitaljulius.config import CONFIG_PATH, save_config
+from digitaljulius.knowledge import KB_FILES, all_entries, forget, learn
+from digitaljulius.self_modify import SelfModResult, reinstall, self_modify
 
 
 @dataclass
@@ -151,6 +153,93 @@ def _cmd_init(ctx) -> None:
     ui.info(f"created {project_md}")
 
 
+def _cmd_learn(ctx, *args) -> None:
+    """/learn [kind] <text> — save a lesson to the knowledge center.
+    kind ∈ {learned, preferences, routing, failures} (default learned)."""
+    if not args:
+        ui.warn("usage: /learn [kind] <text>")
+        return
+    kind = "learned"
+    text_parts = list(args)
+    if text_parts[0].lower() in KB_FILES:
+        kind = text_parts[0].lower()
+        text_parts = text_parts[1:]
+    text = " ".join(text_parts).strip()
+    if not text:
+        ui.warn("nothing to learn — empty text")
+        return
+    entry = learn(text, kind=kind)
+    ui.info(f"saved to {kind}: {entry.text}")
+
+
+def _cmd_knowledge(ctx, *args) -> None:
+    """/knowledge — show accumulated lessons."""
+    entries = all_entries()
+    any_shown = False
+    for kind, bullets in entries.items():
+        if not bullets:
+            continue
+        any_shown = True
+        ui.console.print(f"[bold cyan]{kind}[/bold cyan] ({len(bullets)})")
+        for b in bullets[-10:]:
+            ui.console.print(f"  {b}")
+    if not any_shown:
+        ui.console.print("[dim]knowledge center is empty — use /learn to add[/dim]")
+
+
+def _cmd_forget(ctx, *args) -> None:
+    """/forget <needle> — remove every entry containing <needle>."""
+    needle = " ".join(args).strip()
+    if not needle:
+        ui.warn("usage: /forget <text-to-match>")
+        return
+    n = forget(needle)
+    ui.info(f"forgot {n} entr{'y' if n == 1 else 'ies'} matching {needle!r}")
+
+
+def _confirm(prompt: str) -> bool:
+    ui.console.print(f"[yellow]{prompt}[/yellow] ", end="")
+    try:
+        return input().strip().lower() in {"y", "yes"}
+    except EOFError:
+        return False
+
+
+def _cmd_self(ctx, *args) -> None:
+    """/self <instruction> — let DigitalJulius edit its own source.
+    Plans with Claude Opus, executes with Claude Code, commits, reinstalls."""
+    instruction = " ".join(args).strip()
+    if not instruction:
+        ui.warn("usage: /self <what to change>")
+        return
+
+    ui.info("planning self-modification with Claude Opus…")
+
+    def confirm_apply(plan: str) -> bool:
+        ui.console.print("[bold]Planned changes:[/bold]")
+        ui.console.print(plan)
+        return _confirm("Proceed to apply this plan? (y/N):")
+
+    def confirm_commit(diff: str) -> bool:
+        ui.console.print("[bold]Resulting diff:[/bold]")
+        ui.console.print(diff)
+        return _confirm("Commit these changes? (y/N):")
+
+    result: SelfModResult = self_modify(
+        instruction, ctx["cfg"], confirm_apply, confirm_commit
+    )
+    if not result.ok:
+        ui.error(f"self-modify aborted: {result.note}")
+        return
+    ui.info(f"committed {result.commit_sha} — {result.note}")
+    if _confirm("Reinstall package so changes take effect next launch? (y/N):"):
+        ok, msg = reinstall()
+        if ok:
+            ui.info("reinstalled — restart `dj` to pick up changes")
+        else:
+            ui.error(f"pip reinstall failed: {msg[:400]}")
+
+
 def _cmd_yolo(ctx, *args) -> None:
     """/yolo on|off — toggle YOLO (dangerously-skip-permissions) mode."""
     if args and args[0].lower() in {"off", "false", "0"}:
@@ -174,6 +263,10 @@ REGISTRY: dict[str, SlashCmd] = {
     "log":       SlashCmd("log",       "show this session's turns",                     _cmd_log),
     "init":      SlashCmd("init",      "write a starter PROJECT.md in cwd",             _cmd_init),
     "yolo":      SlashCmd("yolo",      "/yolo on|off — toggle skip-permissions",        _cmd_yolo),
+    "learn":     SlashCmd("learn",     "/learn [kind] <text> — save a lesson",          _cmd_learn),
+    "knowledge": SlashCmd("knowledge", "show accumulated lessons",                      _cmd_knowledge),
+    "forget":    SlashCmd("forget",    "/forget <needle> — drop matching lessons",      _cmd_forget),
+    "self":      SlashCmd("self",      "/self <instruction> — edit DigitalJulius itself", _cmd_self),
     "clear":     SlashCmd("clear",     "clear the screen",                              _cmd_clear),
     "quit":      SlashCmd("quit",      "exit DigitalJulius",                            _cmd_quit),
 }
