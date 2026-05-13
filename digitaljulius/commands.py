@@ -7,7 +7,12 @@ from typing import Callable
 
 from digitaljulius import ui
 from digitaljulius.agents.registry import get_agent
-from digitaljulius.auth import instructions_for, interactive_login, probe
+from digitaljulius.auth import (
+    instructions_for,
+    interactive_login,
+    probe,
+    reset_credentials,
+)
 from digitaljulius.budget import best_available_model
 from digitaljulius.complexity import Tier, classify
 from digitaljulius.config import CONFIG_PATH, save_config
@@ -37,11 +42,11 @@ def _cmd_budget(ctx) -> None:
 
 
 def _cmd_auth(ctx, *args) -> None:
-    """/auth [agent|all]  — show status, or re-run OAuth for one/all agents.
+    """/auth [agent|all]  — show status; walk through missing auth.
 
-      /auth          show status, walk through any missing auth
-      /auth claude   force re-auth for one agent
-      /auth all      force re-auth for every agent
+      /auth                  show status, prompt to log in any missing agents
+      /auth <agent>          reset & re-auth one agent (browser OAuth)
+      /auth all              reset & re-auth every authenticated agent
     """
     target = args[0].lower() if args else ""
     probes = probe()
@@ -50,6 +55,8 @@ def _cmd_auth(ctx, *args) -> None:
     if not target:
         missing = [p for p in probes if not p.authenticated]
         if not missing:
+            ui.info("all installed agents are authenticated. "
+                    "Use `/auth <agent>` to reset and re-auth one.")
             return
         for p in missing:
             if not p.installed:
@@ -59,7 +66,7 @@ def _cmd_auth(ctx, *args) -> None:
             ui.console.print(f"[bold cyan]→ {p.agent}[/bold cyan]  "
                              f"[dim]{instructions_for(p.agent)}[/dim]")
             ui.console.print(f"  Log in to {p.agent} now?")
-            ui.console.print("    [bold]1)[/bold] Yes — log in")
+            ui.console.print("    [bold]1)[/bold] Yes — open OAuth (browser)")
             ui.console.print("    [bold]2)[/bold] No — skip")
             try:
                 choice = input("  > ").strip().lower()
@@ -71,6 +78,8 @@ def _cmd_auth(ctx, *args) -> None:
             ui.info(f"{p.agent}: {'authenticated' if ok else 'still not authenticated'}")
         return
 
+    # Explicit per-agent reset path. This DELETES the existing creds so the
+    # next launch triggers a fresh browser OAuth flow.
     targets = list(probes) if target == "all" else [p for p in probes if p.agent == target]
     if not targets:
         ui.error(f"unknown agent: {target}")
@@ -79,7 +88,28 @@ def _cmd_auth(ctx, *args) -> None:
         if not p.installed:
             ui.error(f"{p.agent}: not installed")
             continue
-        ui.info(f"launching `{p.agent}` — complete OAuth then exit its TUI…")
+        ui.console.print()
+        ui.console.print(f"[bold cyan]→ {p.agent}[/bold cyan]")
+        if p.authenticated:
+            ui.console.print(
+                f"  Reset {p.agent}'s credentials and re-authenticate? "
+                f"[red](will log out everywhere)[/red]"
+            )
+            ui.console.print("    [bold]1)[/bold] Yes — reset & open OAuth")
+            ui.console.print("    [bold]2)[/bold] No — keep current login")
+            try:
+                choice = input("  > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                continue
+            if choice not in {"1", "y", "yes", "reset"}:
+                continue
+            wiped = reset_credentials(p.agent)
+            if wiped is None:
+                ui.warn(f"could not delete {p.agent}'s credentials")
+                continue
+            ui.info(f"deleted {wiped} — launching for fresh OAuth")
+        else:
+            ui.info(f"launching `{p.agent}` for OAuth")
         ok = interactive_login(p.agent)
         ui.info(f"{p.agent}: {'authenticated' if ok else 'still not authenticated'}")
 

@@ -62,6 +62,23 @@ def mark_first_run_complete() -> None:
     STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def reset_credentials(agent_name: str) -> Path | None:
+    """Delete the agent's stored OAuth credentials. Returns the deleted path
+    if anything was removed, else None. Side effect: the agent's next launch
+    will trigger a full browser OAuth flow."""
+    adapter = AGENTS.get(agent_name)
+    if adapter is None:
+        return None
+    path = adapter.credentials_path()
+    if not path.exists():
+        return None
+    try:
+        path.unlink()
+        return path
+    except OSError:
+        return None
+
+
 def interactive_login(agent_name: str) -> bool:
     """Spawn the agent CLI attached to the user's terminal so they can complete
     its OAuth flow in place. Returns True if `is_authenticated()` flips to True

@@ -24,6 +24,7 @@ from digitaljulius.auth import (
     interactive_login,
     mark_first_run_complete,
     probe,
+    reset_credentials,
 )
 from digitaljulius.budget import best_available_model, record_call
 from digitaljulius.commands import command_names, dispatch
@@ -75,30 +76,52 @@ def _login_wizard(force: bool = False) -> bool:
             ui.warn(f"{p.agent}: {p.note} — skipping")
             continue
 
-        if p.authenticated and not force:
-            continue
-
-        verb = "Re-authenticate" if p.authenticated else "Log in to"
         ui.console.print()
         ui.console.print(f"[bold cyan]→ {p.agent}[/bold cyan]  "
                          f"[dim]{instructions_for(p.agent)}[/dim]")
-        ui.console.print(f"  {verb} {p.agent} now?")
-        ui.console.print("    [bold]1)[/bold] Yes — log in")
-        ui.console.print("    [bold]2)[/bold] No — skip")
-        try:
-            choice = input("  > ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            ui.warn(f"skipped {p.agent}")
-            continue
-        if choice not in {"1", "y", "yes"}:
-            ui.warn(f"skipped {p.agent} — run /auth later if you change your mind")
-            continue
 
-        ui.info(
-            f"launching {p.agent} here — its OAuth will open a browser. "
-            f"After it finishes, exit the agent's TUI (Ctrl+C or its /quit) "
-            "to return to DigitalJulius."
-        )
+        if p.authenticated:
+            # Already logged in. Only offer reset+re-auth in force mode, and
+            # make the consequence explicit so the user picks deliberately.
+            if not force:
+                continue
+            ui.console.print(f"  {p.agent} is already authenticated.")
+            ui.console.print(
+                "    [bold]1)[/bold] Keep current login [dim](recommended)[/dim]"
+            )
+            ui.console.print(
+                "    [bold]2)[/bold] Reset credentials and re-authenticate "
+                "[red](will log out everywhere)[/red]"
+            )
+            try:
+                choice = input("  > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                continue
+            if choice not in {"2", "reset"}:
+                continue
+            wiped = reset_credentials(p.agent)
+            if wiped is None:
+                ui.warn(f"could not delete {p.agent}'s credentials — skipping")
+                continue
+            ui.info(f"deleted {wiped} — launching {p.agent} for a fresh OAuth flow")
+        else:
+            ui.console.print(f"  Log in to {p.agent} now?")
+            ui.console.print("    [bold]1)[/bold] Yes — open OAuth (browser)")
+            ui.console.print("    [bold]2)[/bold] No — skip")
+            try:
+                choice = input("  > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ui.warn(f"skipped {p.agent}")
+                continue
+            if choice not in {"1", "y", "yes"}:
+                ui.warn(f"skipped {p.agent} — run /auth later if you change your mind")
+                continue
+            ui.info(
+                f"launching {p.agent} — its OAuth will open a browser. "
+                "After it finishes, exit the agent's TUI (Ctrl+C or its /quit) "
+                "to return to DigitalJulius."
+            )
+
         ok = interactive_login(p.agent)
         if ok:
             ui.info(f"{p.agent} authenticated")
