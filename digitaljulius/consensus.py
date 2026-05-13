@@ -12,6 +12,7 @@ from pathlib import Path
 from digitaljulius.agents.base import AgentResponse
 from digitaljulius.agents.registry import get_agent
 from digitaljulius.budget import best_available_model, record_call
+from digitaljulius.events import Reporter, StepEvent, silent
 
 
 @dataclass
@@ -44,10 +45,28 @@ Write the final answer now. Do not preface it with "Final answer:" — just
 write the answer."""
 
 
-def _call(agent_name: str, model: str, prompt: str, cwd: Path | None) -> AgentResponse:
+def _call(
+    agent_name: str,
+    model: str,
+    prompt: str,
+    cwd: Path | None,
+    on_event: Reporter,
+) -> AgentResponse:
+    import time
     adapter = get_agent(agent_name)
+    on_event(StepEvent(
+        kind="agent_start", label=f"{agent_name} generating",
+        agent=agent_name, model=model,
+    ))
+    t0 = time.time()
     resp = adapter.run(prompt, model=model, yolo=True, cwd=cwd, timeout=300)
     record_call(agent_name, model)
+    on_event(StepEvent(
+        kind="agent_done" if resp.ok else "agent_fail",
+        label=f"{agent_name} {'done' if resp.ok else 'failed'}",
+        agent=agent_name, model=model, duration_s=time.time() - t0,
+        note="" if resp.ok else (resp.stderr or "")[:200],
+    ))
     return resp
 
 
@@ -56,8 +75,10 @@ def run_consensus(
     cfg: dict,
     agents: list[str],
     cwd: Path | None = None,
+    on_event: Reporter | None = None,
 ) -> ConsensusResult:
     """Call each agent in parallel with its best available model."""
+    on_event = on_event or silent
     result = ConsensusResult()
     plan: list[tuple[str, str]] = []
     for agent in agents:
@@ -74,7 +95,7 @@ def run_consensus(
 
     with ThreadPoolExecutor(max_workers=len(plan)) as pool:
         futures = {
-            pool.submit(_call, agent, model, prompt, cwd): (agent, model)
+            pool.submit(_call, agent, model, prompt, cwd, on_event): (agent, model)
             for agent, model in plan
         }
         for fut in as_completed(futures):

@@ -29,10 +29,42 @@ from digitaljulius.auth import (
 from digitaljulius.budget import best_available_model, record_call
 from digitaljulius.commands import command_names, dispatch
 from digitaljulius.config import load_config, save_config
+from digitaljulius.events import StepEvent
 from digitaljulius.knowledge import auto_distill, ensure_kb
 from digitaljulius.orchestrator import run_prompt
 from digitaljulius.state import new_session, turn_from_runresult
 
+
+
+def _live_reporter(event: StepEvent) -> None:
+    """Pretty-print a pipeline step as it happens — single line, threadsafe."""
+    model_tag = f" [cyan]{event.model}[/cyan]" if event.model else ""
+    agent_tag = f"[magenta]{event.agent}[/magenta]" if event.agent else ""
+    dur = f" [dim]({event.duration_s:.1f}s)[/dim]" if event.duration_s else ""
+
+    if event.kind.endswith("_start"):
+        head = "[bold blue]●[/bold blue]"
+        body = event.label
+        if agent_tag:
+            body = f"{agent_tag} — {event.label}"
+        ui.console.print(f"{head} {body}{model_tag}")
+    elif event.kind.endswith("_done"):
+        head = "[green]✔[/green]"
+        body = event.label
+        if agent_tag:
+            body = f"{agent_tag} — {event.label}"
+        ui.console.print(f"{head} {body}{model_tag}{dur}")
+        if event.note:
+            ui.console.print(f"  [dim]{event.note}[/dim]")
+    elif event.kind.endswith("_fail"):
+        head = "[red]✖[/red]"
+        ui.console.print(f"{head} {event.label}{model_tag}{dur}")
+        if event.note:
+            ui.console.print(f"  [dim red]{event.note}[/dim red]")
+    elif event.kind.endswith("_skip"):
+        ui.console.print(f"[yellow]↷[/yellow] {event.label} [dim]({event.note})[/dim]")
+    else:
+        ui.console.print(f"  {event.label}")
 
 
 def _confirm_twin(question: str) -> bool:
@@ -210,7 +242,10 @@ def _interactive_loop(cfg: dict, cwd: Path) -> None:
             continue
 
         try:
-            run_result = run_prompt(line, cfg, cwd=cwd, confirm=_confirm_twin)
+            run_result = run_prompt(
+                line, cfg, cwd=cwd,
+                confirm=_confirm_twin, on_event=_live_reporter,
+            )
         except KeyboardInterrupt:
             ui.warn("interrupted")
             continue
@@ -250,7 +285,10 @@ def _run_forced_consensus(prompt: str, ctx: dict) -> None:
     # Hack: temporarily inject the word 'critical' so classifier picks CRITICAL,
     # then run normally. We keep the original prompt for display.
     forced_prompt = f"[critical] {prompt}"
-    run_result = run_prompt(forced_prompt, cfg, cwd=cwd, confirm=_confirm_twin)
+    run_result = run_prompt(
+        forced_prompt, cfg, cwd=cwd,
+        confirm=_confirm_twin, on_event=_live_reporter,
+    )
     _render_run(prompt, run_result)
     if ctx.get("session"):
         ctx["session"].append(turn_from_runresult(prompt, run_result))
@@ -285,7 +323,10 @@ def _run(
             return
 
     if prompt:
-        run_result = run_prompt(prompt, cfg, cwd=work_cwd, confirm=_confirm_twin)
+        run_result = run_prompt(
+            prompt, cfg, cwd=work_cwd,
+            confirm=_confirm_twin, on_event=_live_reporter,
+        )
         _render_run(prompt, run_result)
         return
 
