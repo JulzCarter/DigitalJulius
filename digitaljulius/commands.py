@@ -52,14 +52,20 @@ def _cmd_auth(ctx, *args) -> None:
         if not missing:
             return
         for p in missing:
+            if not p.installed:
+                ui.warn(f"{p.agent}: not installed — skipping")
+                continue
             ui.console.print()
-            ui.console.print(f"[bold cyan]→ {p.agent}[/bold cyan]")
-            ui.console.print(f"  [dim]{instructions_for(p.agent)}[/dim]")
+            ui.console.print(f"[bold cyan]→ {p.agent}[/bold cyan]  "
+                             f"[dim]{instructions_for(p.agent)}[/dim]")
+            ui.console.print(f"  Log in to {p.agent} now?")
+            ui.console.print("    [bold]1)[/bold] Yes — log in")
+            ui.console.print("    [bold]2)[/bold] No — skip")
             try:
-                choice = input("  Launch now? (Y/n): ").strip().lower()
+                choice = input("  > ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 continue
-            if choice in {"n", "no", "s", "skip"}:
+            if choice not in {"1", "y", "yes"}:
                 continue
             ok = interactive_login(p.agent)
             ui.info(f"{p.agent}: {'authenticated' if ok else 'still not authenticated'}")

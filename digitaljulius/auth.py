@@ -87,21 +87,12 @@ def interactive_login(agent_name: str) -> bool:
 
 
 def instructions_for(agent: str) -> str:
-    """User-facing instructions for authenticating a specific agent."""
+    """One-line tagline describing what the OAuth flow will do."""
     return {
-        "claude": (
-            "Open a new terminal and run `claude` once. It should already be "
-            "logged in if you've used Claude Code before; if not, follow its "
-            "OAuth prompt to sign into your Anthropic account."
-        ),
-        "gemini": (
-            "Open a new terminal and run `gemini` once. It will open a browser "
-            "to sign you into a personal Google account — free tier is granted "
-            "automatically, no credit card."
-        ),
-        "qwen": (
-            "Open a new terminal and run `qwen` once. It will open a browser "
-            "to sign you into Alibaba Cloud — free tier is granted automatically, "
-            "no credit card."
-        ),
-    }.get(agent, f"Run `{agent}` once and follow its auth prompt.")
+        "claude":
+            "Sign in to your Anthropic account (free if you have Claude Code).",
+        "gemini":
+            "Sign in to a personal Google account (free tier, no credit card).",
+        "qwen":
+            "Sign in to Alibaba Cloud (free tier, no credit card).",
+    }.get(agent, f"Run the `{agent}` OAuth flow.")

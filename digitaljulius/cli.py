@@ -72,39 +72,38 @@ def _login_wizard(force: bool = False) -> bool:
 
     for p in targets:
         if not p.installed:
-            ui.error(f"{p.agent}: {p.note}. Install it first, then re-launch.")
+            ui.warn(f"{p.agent}: {p.note} — skipping")
             continue
 
         if p.authenticated and not force:
             continue
 
-        already = " (re-authing)" if p.authenticated else ""
+        verb = "Re-authenticate" if p.authenticated else "Log in to"
         ui.console.print()
-        ui.console.print(f"[bold cyan]→ {p.agent}{already}[/bold cyan]")
-        ui.console.print(f"  [dim]{instructions_for(p.agent)}[/dim]")
-        ui.console.print(
-            f"  [dim]Press Enter to launch `{p.agent}` now. "
-            f"Skip with `s` + Enter.[/dim]"
-        )
+        ui.console.print(f"[bold cyan]→ {p.agent}[/bold cyan]  "
+                         f"[dim]{instructions_for(p.agent)}[/dim]")
+        ui.console.print(f"  {verb} {p.agent} now?")
+        ui.console.print("    [bold]1)[/bold] Yes — log in")
+        ui.console.print("    [bold]2)[/bold] No — skip")
         try:
             choice = input("  > ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             ui.warn(f"skipped {p.agent}")
             continue
-        if choice in {"s", "skip", "n"}:
-            ui.warn(f"skipped {p.agent} — you can run /auth later")
+        if choice not in {"1", "y", "yes"}:
+            ui.warn(f"skipped {p.agent} — run /auth later if you change your mind")
             continue
 
-        ui.info(f"launching `{p.agent}` — complete OAuth in browser, then "
-                f"type the agent's quit command to return here…")
+        ui.info(
+            f"launching {p.agent} here — its OAuth will open a browser. "
+            f"After it finishes, exit the agent's TUI (Ctrl+C or its /quit) "
+            "to return to DigitalJulius."
+        )
         ok = interactive_login(p.agent)
         if ok:
-            ui.info(f"✔ {p.agent} authenticated")
+            ui.info(f"{p.agent} authenticated")
         else:
-            ui.warn(
-                f"{p.agent} still unauthenticated — re-run `/auth` from inside "
-                "DigitalJulius any time, or skip and use the other agents."
-            )
+            ui.warn(f"{p.agent} still not authenticated — try `/auth {p.agent}` later")
 
     mark_first_run_complete()
     final = probe()
