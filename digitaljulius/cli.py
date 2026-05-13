@@ -21,6 +21,7 @@ from digitaljulius.auth import (
     fully_authenticated,
     first_run_completed,
     instructions_for,
+    interactive_login,
     mark_first_run_complete,
     probe,
 )
@@ -42,22 +43,74 @@ def _confirm_twin(question: str) -> bool:
     return answer in {"y", "yes"}
 
 
-def _first_run_wizard() -> None:
-    ui.banner()
-    ui.info("First-run setup — checking agent auth…")
+def _login_wizard(force: bool = False) -> bool:
+    """Walk the user through OAuth for each unauthenticated agent.
+
+    Spawns the agent's CLI attached to this terminal so the user can complete
+    the flow in place — same UX as launching `claude` / `gemini` / `qwen` cold.
+    Returns True if at least one agent ends up authenticated.
+    """
     probes = probe()
+    if fully_authenticated(probes) and not force:
+        return True
+
+    ui.banner()
+    ui.info("Checking agent authentication…")
     ui.render_auth(probes)
-    if fully_authenticated(probes):
-        ui.info("All agents authenticated. You're good to go.")
-        mark_first_run_complete()
-        return
-    ui.warn("Some agents need auth. Follow the steps below, then re-run.")
-    for p in probes:
-        if not p.authenticated:
-            ui.console.print(f"\n[bold]{p.agent}[/bold]: {instructions_for(p.agent)}")
     ui.console.print()
-    ui.info("Once you've signed each one in, run `digitaljulius` again.")
+
+    targets = [p for p in probes if force or not p.authenticated]
+    if not targets:
+        return True
+
+    if not force:
+        ui.warn(
+            f"{len(targets)} agent(s) need auth. We'll walk through each one — "
+            "the agent's own OAuth flow runs in this terminal, then exit its "
+            "TUI (e.g. /quit or Ctrl+C) to come back to DigitalJulius."
+        )
+
+    for p in targets:
+        if not p.installed:
+            ui.error(f"{p.agent}: {p.note}. Install it first, then re-launch.")
+            continue
+
+        if p.authenticated and not force:
+            continue
+
+        already = " (re-authing)" if p.authenticated else ""
+        ui.console.print()
+        ui.console.print(f"[bold cyan]→ {p.agent}{already}[/bold cyan]")
+        ui.console.print(f"  [dim]{instructions_for(p.agent)}[/dim]")
+        ui.console.print(
+            f"  [dim]Press Enter to launch `{p.agent}` now. "
+            f"Skip with `s` + Enter.[/dim]"
+        )
+        try:
+            choice = input("  > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ui.warn(f"skipped {p.agent}")
+            continue
+        if choice in {"s", "skip", "n"}:
+            ui.warn(f"skipped {p.agent} — you can run /auth later")
+            continue
+
+        ui.info(f"launching `{p.agent}` — complete OAuth in browser, then "
+                f"type the agent's quit command to return here…")
+        ok = interactive_login(p.agent)
+        if ok:
+            ui.info(f"✔ {p.agent} authenticated")
+        else:
+            ui.warn(
+                f"{p.agent} still unauthenticated — re-run `/auth` from inside "
+                "DigitalJulius any time, or skip and use the other agents."
+            )
+
     mark_first_run_complete()
+    final = probe()
+    ui.console.print()
+    ui.render_auth(final)
+    return any(pp.authenticated for pp in final)
 
 
 def _render_run(prompt: str, run_result) -> None:
@@ -187,6 +240,9 @@ def _run(
     ),
     yolo: bool = typer.Option(True, "--yolo/--safe", help="skip permission prompts"),
     cwd: Path | None = typer.Option(None, "--cwd", help="working directory"),
+    login: bool = typer.Option(
+        False, "--login", help="force the OAuth walkthrough for every agent"
+    ),
 ) -> None:
     """DigitalJulius — orchestrator across Claude / Gemini / Qwen."""
     cfg = load_config()
@@ -196,10 +252,14 @@ def _run(
     ensure_kb()
     work_cwd = (cwd or Path.cwd()).resolve()
 
-    if not first_run_completed():
-        _first_run_wizard()
-        # If they aren't authenticated yet, bail so they can fix it.
-        if not fully_authenticated(probe()):
+    # Headless one-shots skip the interactive wizard — they're typically
+    # scripted; if auth is missing the orchestrator will surface that itself.
+    if not prompt:
+        if not _login_wizard(force=login):
+            ui.error(
+                "no agents authenticated; nothing to route to. "
+                "Re-run `dj --login` to retry."
+            )
             return
 
     if prompt:

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -58,6 +60,30 @@ def mark_first_run_complete() -> None:
             data = {}
     data["first_run_completed"] = True
     STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def interactive_login(agent_name: str) -> bool:
+    """Spawn the agent CLI attached to the user's terminal so they can complete
+    its OAuth flow in place. Returns True if `is_authenticated()` flips to True
+    after the user exits the child process."""
+    adapter = AGENTS.get(agent_name)
+    if adapter is None:
+        return False
+    if not adapter.is_installed():
+        return False
+    cmd_path = shutil.which(adapter.command) or adapter.command
+    try:
+        # No capture_output / no input: stdin/stdout/stderr inherit the parent
+        # terminal so the user types into the CLI directly. The agent prints
+        # its OAuth URL, opens a browser, and drops into its TUI when done.
+        subprocess.run([cmd_path], check=False)
+    except KeyboardInterrupt:
+        # User pressed Ctrl+C inside the child — that's a normal way to exit
+        # those TUIs. Fall through to the auth re-check.
+        pass
+    except FileNotFoundError:
+        return False
+    return adapter.is_authenticated()
 
 
 def instructions_for(agent: str) -> str:

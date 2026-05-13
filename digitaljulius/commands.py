@@ -7,7 +7,7 @@ from typing import Callable
 
 from digitaljulius import ui
 from digitaljulius.agents.registry import get_agent
-from digitaljulius.auth import instructions_for, probe
+from digitaljulius.auth import instructions_for, interactive_login, probe
 from digitaljulius.budget import best_available_model
 from digitaljulius.complexity import Tier, classify
 from digitaljulius.config import CONFIG_PATH, save_config
@@ -36,12 +36,46 @@ def _cmd_budget(ctx) -> None:
     ui.render_budget(ctx["cfg"])
 
 
-def _cmd_auth(ctx) -> None:
+def _cmd_auth(ctx, *args) -> None:
+    """/auth [agent|all]  — show status, or re-run OAuth for one/all agents.
+
+      /auth          show status, walk through any missing auth
+      /auth claude   force re-auth for one agent
+      /auth all      force re-auth for every agent
+    """
+    target = args[0].lower() if args else ""
     probes = probe()
     ui.render_auth(probes)
-    for p in probes:
-        if not p.authenticated:
-            ui.warn(f"{p.agent}: {instructions_for(p.agent)}")
+
+    if not target:
+        missing = [p for p in probes if not p.authenticated]
+        if not missing:
+            return
+        for p in missing:
+            ui.console.print()
+            ui.console.print(f"[bold cyan]→ {p.agent}[/bold cyan]")
+            ui.console.print(f"  [dim]{instructions_for(p.agent)}[/dim]")
+            try:
+                choice = input("  Launch now? (Y/n): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                continue
+            if choice in {"n", "no", "s", "skip"}:
+                continue
+            ok = interactive_login(p.agent)
+            ui.info(f"{p.agent}: {'authenticated' if ok else 'still not authenticated'}")
+        return
+
+    targets = list(probes) if target == "all" else [p for p in probes if p.agent == target]
+    if not targets:
+        ui.error(f"unknown agent: {target}")
+        return
+    for p in targets:
+        if not p.installed:
+            ui.error(f"{p.agent}: not installed")
+            continue
+        ui.info(f"launching `{p.agent}` — complete OAuth then exit its TUI…")
+        ok = interactive_login(p.agent)
+        ui.info(f"{p.agent}: {'authenticated' if ok else 'still not authenticated'}")
 
 
 def _cmd_clear(ctx) -> None:
