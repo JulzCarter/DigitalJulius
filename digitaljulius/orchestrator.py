@@ -126,6 +126,7 @@ def _try_agents_in_order(
     cfg: dict,
     cwd: Path | None,
     on_event: Reporter,
+    tags: list[str] | None = None,
 ) -> AgentResponse | None:
     """Walk `agents` until one returns a non-quota response. Returns None if
     every agent was exhausted.
@@ -146,6 +147,7 @@ def _try_agents_in_order(
     last_failed_agent = ""
     last_failed_model = ""
     last_failure_reason = ""
+    self_modify = "self_modify" in (tags or [])
 
     while queue:
         agent = queue.pop(0)
@@ -178,6 +180,11 @@ def _try_agents_in_order(
         attempts.append((agent, last_failed_model, last_failure_reason))
 
         if resp.stderr == "QUOTA_EXCEEDED":
+            if self_modify:
+                msg = f"{agent} exhausted on a self-modification task; rerun later or top up."
+                resp.stderr = msg
+                on_event(StepEvent(kind="route_done", label=msg, agent=agent))
+                return resp
             note = f"{agent} exhausted — rotating to next agent (with handoff context)"
             if agent == PRIMARY_BOSS and SECONDARY_BOSS not in seen:
                 if SECONDARY_BOSS in queue:
@@ -287,18 +294,25 @@ def run_prompt(
         drafted = draft_plan(prompt, cfg, cwd=cwd, confirm_planning=confirm_planning)
         on_event(StepEvent(
             kind="plan_draft_done",
-            label=f"plan drafted: {len(drafted.steps)} steps",
+            label=(
+                f"plan drafted: {len(drafted.steps)} steps"
+                if drafted is not None else
+                "couldn't draft a plan, escalating to direct execution"
+            ),
             duration_s=time.time() - t_plan,
         ))
-        approved = review_drafted_plan(drafted)
-        if approved is None:
-            result.skipped_reason = "plan rejected by user"
-            log.info("orchestrator.plan_rejected")
-            return result
-        result.plan = approved
-        # Inject the approved plan into the worker prompt so agents follow
-        # it instead of re-deriving their own approach.
-        enriched_prompt = plan_to_worker_prefix(approved) + "\n\n" + enriched_prompt
+        if drafted is None:
+            log.warning("orchestrator.plan_draft_failed_direct_execution")
+        else:
+            approved = review_drafted_plan(drafted)
+            if approved is None:
+                result.skipped_reason = "plan rejected by user"
+                log.info("orchestrator.plan_rejected")
+                return result
+            result.plan = approved
+            # Inject the approved plan into the worker prompt so agents follow
+            # it instead of re-deriving their own approach.
+            enriched_prompt = plan_to_worker_prefix(approved) + "\n\n" + enriched_prompt
 
     # Apply the user-locked execution directive so every worker agent
     # executes the task instead of returning manual instructions.
@@ -311,7 +325,7 @@ def run_prompt(
             result.skipped_reason = "no authenticated agent with quota available"
             return result
 
-        resp = _try_agents_in_order(enriched_prompt, agents, cfg, cwd, on_event)
+        resp = _try_agents_in_order(enriched_prompt, agents, cfg, cwd, on_event, tags)
         if resp is None:
             result.skipped_reason = "all agents exhausted for today"
             return result
@@ -347,10 +361,27 @@ def run_prompt(
 
     # ---- COMPLEX and CRITICAL: consensus path ----
     max_n = 2 if tier == Tier.COMPLEX else 3
-    agents = _pick_agents_for(tags, cfg, max_n=max_n)
+    pick_max_n = 5 if tier == Tier.COMPLEX else max_n
+    agents = _pick_agents_for(tags, cfg, max_n=pick_max_n)
     if not agents:
         result.skipped_reason = "no authenticated agents available"
         return result
+
+    # COMPLEX/CRITICAL: route to openai + codex in parallel as primary
+    # workers when both are available. They're the highest-tier non-Claude
+    # options — fast (parallel) and high-quality. Claude joins as third
+    # voice for consensus when CRITICAL.
+    parallel_pair = [a for a in ("openai", "codex") if a in agents]
+    if parallel_pair and tier in (Tier.COMPLEX, Tier.CRITICAL):
+        # Move the parallel pair to the front before applying the tier cap,
+        # so COMPLEX keeps both halves of the pair when both are available.
+        rest = [a for a in agents if a not in parallel_pair]
+        agents = (parallel_pair + rest)[:max_n]
+        log.info("orchestrator.complex_parallel agents=%s", agents)
+        on_event(StepEvent(
+            kind="route_done",
+            label=f"COMPLEX tier — fanning out to {parallel_pair} in parallel",
+        ))
 
     twin = False
     if tier == Tier.CRITICAL:
@@ -394,21 +425,6 @@ def run_prompt(
             result.skipped_reason = "plan blocked by approver"
             return result
 
-    # COMPLEX/CRITICAL: route to openai + codex in parallel as primary
-    # workers when both are available. They're the highest-tier non-Claude
-    # options — fast (parallel) and high-quality. Claude joins as third
-    # voice for consensus when CRITICAL.
-    parallel_pair = [a for a in ("openai", "codex") if a in agents]
-    if parallel_pair and tier in (Tier.COMPLEX, Tier.CRITICAL):
-        # Move the parallel pair to the front of the worker list.
-        rest = [a for a in agents if a not in parallel_pair]
-        agents = parallel_pair + rest
-        log.info("orchestrator.complex_parallel agents=%s", agents)
-        on_event(StepEvent(
-            kind="route_done",
-            label=f"COMPLEX tier — fanning out to {parallel_pair} in parallel",
-        ))
-
     consensus = run_consensus(enriched_prompt, cfg, agents, cwd=cwd, on_event=on_event)
 
     # If consensus came back empty (everyone hit quota), degrade gracefully
@@ -418,7 +434,7 @@ def run_prompt(
             kind="route_done",
             label="consensus empty — degrading to single-agent fallback",
         ))
-        fallback = _try_agents_in_order(enriched_prompt, agents, cfg, cwd, on_event)
+        fallback = _try_agents_in_order(enriched_prompt, agents, cfg, cwd, on_event, tags)
         if fallback and fallback.ok:
             consensus.responses.append(fallback)
 

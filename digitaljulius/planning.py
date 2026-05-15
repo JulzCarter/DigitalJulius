@@ -78,7 +78,7 @@ def draft_plan(
     cfg: dict,
     cwd: Path | None = None,
     confirm_planning: PlanningChoiceFn | None = None,
-) -> Plan:
+) -> Plan | None:
     """Ask the planning role to draft a structured plan. Top-tier only."""
     plan_cfg = cfg.get("approver", {"agent": "claude", "model": "opus"})
     prompt = PLAN_PROMPT.replace("{prompt}", user_prompt)
@@ -89,12 +89,12 @@ def draft_plan(
     )
     if resp is None or not resp.ok or not resp.text:
         log.warning("planning.draft_failed")
-        return Plan(summary="(plan draft failed — top-tier planners exhausted)", raw=resp.stderr if resp else "")
+        return None
 
     parsed = _extract_json(resp.text)
     if not parsed:
-        # Free-form fallback: treat the whole response as the summary
-        return Plan(summary=resp.text[:300], raw=resp.text)
+        log.warning("planning.draft_unparseable")
+        return None
 
     plan = Plan(
         summary=parsed.get("summary", "").strip(),
@@ -103,6 +103,9 @@ def draft_plan(
         artifacts=[a.strip() for a in parsed.get("artifacts", []) if a and a.strip()],
         raw=resp.text,
     )
+    if not plan.steps:
+        log.warning("planning.draft_empty_steps")
+        return None
     log.info("planning.draft_done steps=%d risks=%d artifacts=%d",
              len(plan.steps), len(plan.risks), len(plan.artifacts))
     return plan
