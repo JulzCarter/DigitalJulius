@@ -17,21 +17,33 @@ from digitaljulius.config import DJ_HOME, ensure_dirs
 SECRETS_PATH = DJ_HOME / "secrets.json"
 
 
+class SecretsCorruptError(ValueError):
+    """Raised when secrets.json exists but cannot be parsed safely."""
+
+
 def _load() -> dict[str, str]:
     ensure_dirs()
-    if not SECRETS_PATH.exists():
-        return {}
     try:
-        return json.loads(SECRETS_PATH.read_text(encoding="utf-8"))
-    except Exception:
+        raw = SECRETS_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return {}
+    except UnicodeDecodeError as exc:
+        raise SecretsCorruptError(
+            "secrets.json is corrupt; back it up and remove it before retrying."
+        ) from exc
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SecretsCorruptError(
+            "secrets.json is corrupt; back it up and remove it before retrying."
+        ) from exc
 
 
 def _save(data: dict[str, str]) -> None:
     ensure_dirs()
-    SECRETS_PATH.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    tmp_path = SECRETS_PATH.with_name(f"{SECRETS_PATH.name}.tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp_path, SECRETS_PATH)
     try:
         os.chmod(SECRETS_PATH, 0o600)
     except OSError:

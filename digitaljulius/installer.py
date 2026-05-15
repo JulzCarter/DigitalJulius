@@ -7,28 +7,34 @@ installed this way.
 """
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from typing import TypedDict
+
+
+class PipAllowlistEntry(TypedDict):
+    package: str
+    import_module: str
 
 # Pure-PyPI SDKs we'll install on the user's behalf. Anything not here must
 # be installed manually.
-PIP_ALLOWLIST: dict[str, str] = {
+PIP_ALLOWLIST: dict[str, str | PipAllowlistEntry] = {
     # provider name → pip package + import module
-    "anthropic":  "anthropic",
-    "openai":     "openai",
-    "openrouter": "openai",       # OpenRouter is OpenAI-compatible
-    "groq":       "groq",
-    "mistralai":  "mistralai",
-    "cohere":     "cohere",
-    "deepseek":   "openai",       # OpenAI-compatible
-    "together":   "openai",
-    "fireworks":  "openai",
-    "cerebras":   "openai",
-    "ollama":     "ollama",
-    "google-genai": "google-genai",
+    "anthropic": {"package": "anthropic", "import_module": "anthropic"},
+    "openai": {"package": "openai", "import_module": "openai"},
+    "openrouter": {"package": "openai", "import_module": "openai"},  # OpenAI-compatible
+    "groq": {"package": "groq", "import_module": "groq"},
+    "mistralai": {"package": "mistralai", "import_module": "mistralai"},
+    "cohere": {"package": "cohere", "import_module": "cohere"},
+    "deepseek": {"package": "openai", "import_module": "openai"},  # OpenAI-compatible
+    "together": {"package": "openai", "import_module": "openai"},
+    "fireworks": {"package": "openai", "import_module": "openai"},
+    "cerebras": {"package": "openai", "import_module": "openai"},
+    "ollama": {"package": "ollama", "import_module": "ollama"},
+    "google-genai": {"package": "google-genai", "import_module": "google.genai"},
 }
 
 NPM_ALLOWLIST: dict[str, str] = {
@@ -47,11 +53,17 @@ class InstallResult:
     output: str = ""
 
 
-def is_pip_pkg_available(pkg_or_import: str) -> bool:
-    """Cheap availability check: try to import; on miss try pip show."""
+def _pip_package_and_import(entry: str | PipAllowlistEntry) -> tuple[str, str]:
+    if isinstance(entry, str):
+        return entry, entry
+    return entry["package"], entry["import_module"]
+
+
+def is_pip_pkg_available(pkg_or_import: str | PipAllowlistEntry) -> bool:
+    """Cheap availability check: look for the configured import module."""
+    _package, import_module = _pip_package_and_import(pkg_or_import)
     try:
-        importlib.import_module(pkg_or_import.replace("-", "_"))
-        return True
+        return importlib.util.find_spec(import_module) is not None
     except Exception:
         return False
 
@@ -67,11 +79,12 @@ def ensure_pip_pkg(
     confirm(pkg) returns True to proceed with install, False to abort.
     """
     log = on_log or (lambda _l: None)
-    pkg = PIP_ALLOWLIST.get(provider_name)
-    if pkg is None:
+    entry = PIP_ALLOWLIST.get(provider_name)
+    if entry is None:
         return InstallResult(ok=False, package=provider_name, via="skip",
                              output="provider not in pip allowlist; install manually")
-    if is_pip_pkg_available(pkg):
+    pkg, _import_module = _pip_package_and_import(entry)
+    if is_pip_pkg_available(entry):
         return InstallResult(ok=True, package=pkg, via="skip", output="already installed")
 
     if confirm and not confirm(pkg):
