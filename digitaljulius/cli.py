@@ -642,12 +642,14 @@ def _run_forced_consensus(prompt: str, ctx: dict) -> None:
     orchestrator so the approver review still happens."""
     cfg = ctx["cfg"]
     cwd = ctx["cwd"]
+    proj_ctx, hist_ctx = _build_context(cfg, cwd, ctx.get("session"))
     # Hack: temporarily inject the word 'critical' so classifier picks CRITICAL,
     # then run normally. We keep the original prompt for display.
     forced_prompt = f"[critical] {prompt}"
     run_result = run_prompt(
         forced_prompt, cfg, cwd=cwd,
         confirm=_confirm_twin, on_event=_live_reporter,
+        project_context=proj_ctx, history_context=hist_ctx,
         confirm_planning=_confirm_planning_choice,
         review_drafted_plan=_review_drafted_plan,
     )
@@ -700,9 +702,11 @@ def _run(
             return
 
     if prompt:
+        proj_ctx, _hist_ctx = _build_context(cfg, work_cwd, None)
         run_result = run_prompt(
             prompt, cfg, cwd=work_cwd,
             confirm=_confirm_twin, on_event=_live_reporter,
+            project_context=proj_ctx,
             confirm_planning=_confirm_planning_choice,
             review_drafted_plan=_review_drafted_plan,
         )
