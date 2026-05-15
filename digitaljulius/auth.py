@@ -88,15 +88,21 @@ def interactive_login(agent_name: str) -> bool:
         return False
     if not adapter.is_installed():
         return False
+    
+    # OpenAI uses a key, not OAuth — the user runs `/openai set-key` instead.
+    if agent_name == "openai":
+        return adapter.is_authenticated()
+
     cmd_path = shutil.which(adapter.command) or adapter.command
+    argv = [cmd_path]
+    if agent_name == "github":
+        argv = [cmd_path, "auth", "login"]
+    elif agent_name == "codex":
+        argv = [cmd_path, "login"]
+
     try:
-        # No capture_output / no input: stdin/stdout/stderr inherit the parent
-        # terminal so the user types into the CLI directly. The agent prints
-        # its OAuth URL, opens a browser, and drops into its TUI when done.
-        subprocess.run([cmd_path], check=False)
+        subprocess.run(argv, check=False)
     except KeyboardInterrupt:
-        # User pressed Ctrl+C inside the child — that's a normal way to exit
-        # those TUIs. Fall through to the auth re-check.
         pass
     except FileNotFoundError:
         return False
@@ -108,8 +114,12 @@ def instructions_for(agent: str) -> str:
     return {
         "claude":
             "Sign in to your Anthropic account (free if you have Claude Code).",
+        "openai":
+            "Set OPENAI_API_KEY via `/openai set-key sk-…` (uses your $250 API credits).",
+        "codex":
+            "Sign in via `codex login` (uses your ChatGPT Pro 20x plan).",
         "gemini":
             "Sign in to a personal Google account (free tier, no credit card).",
-        "qwen":
-            "Sign in to Alibaba Cloud (free tier, no credit card).",
+        "github":
+            "Sign in to GitHub (free tier, no credit card, access powerful models).",
     }.get(agent, f"Run the `{agent}` OAuth flow.")

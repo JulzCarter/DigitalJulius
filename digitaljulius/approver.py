@@ -13,6 +13,7 @@ from pathlib import Path
 
 from digitaljulius.agents.registry import get_agent
 from digitaljulius.budget import record_call
+from digitaljulius.roles import PlanningChoiceFn, resilient_role_call
 
 
 @dataclass
@@ -24,8 +25,8 @@ class Verdict:
 
 
 PLAN_PROMPT = """You are the plan-reviewer for an orchestrator that routes work
-across Claude Code, Gemini CLI, and Qwen Code. Decide whether the proposed plan
-is sound. Respond ONLY with valid JSON:
+across Claude Code, Gemini CLI, and GitHub Models. Decide whether the proposed
+plan is sound. Respond ONLY with valid JSON:
 
 {
   "approved": true | false,
@@ -69,21 +70,26 @@ Agent ({agent}) response:
 Output JSON only."""
 
 
-def _run(prompt: str, cfg: dict, cwd: Path | None = None) -> Verdict:
-    approver_cfg = cfg.get("approver", {})
-    agent_name = approver_cfg.get("agent", "claude")
-    model = approver_cfg.get("model", "opus")
+def _run(
+    prompt: str,
+    cfg: dict,
+    cwd: Path | None = None,
+    confirm_planning: PlanningChoiceFn | None = None,
+) -> Verdict:
+    approver_cfg = cfg.get("approver", {"agent": "claude", "model": "opus"})
 
-    try:
-        adapter = get_agent(agent_name)
-    except KeyError:
-        return Verdict(approved=True, critique="approver unavailable", suggestions=[])
-
-    if not (adapter.is_installed() and adapter.is_authenticated()):
-        return Verdict(approved=True, critique="approver not authenticated", suggestions=[])
-
-    resp = adapter.run(prompt, model=model, yolo=True, cwd=cwd, timeout=120)
-    record_call(agent_name, model)
+    # Approver IS a planning role — top-tier only, no silent downgrade.
+    resp = resilient_role_call(
+        approver_cfg, prompt, cfg, cwd=cwd, timeout=120,
+        planning=True, confirm_planning=confirm_planning,
+    )
+    if resp is None:
+        return Verdict(
+            approved=True,
+            critique="approver unavailable — every top-tier planner exhausted "
+                     "and downgrade declined or no callback wired",
+            suggestions=[],
+        )
 
     if not resp.ok or not resp.text:
         return Verdict(approved=True, critique="approver failed to respond", suggestions=[], raw=resp.stderr)
@@ -100,19 +106,26 @@ def _run(prompt: str, cfg: dict, cwd: Path | None = None) -> Verdict:
     )
 
 
-def review_plan(goal: str, plan: str, cfg: dict, cwd: Path | None = None) -> Verdict:
+def review_plan(
+    goal: str, plan: str, cfg: dict, cwd: Path | None = None,
+    confirm_planning: PlanningChoiceFn | None = None,
+) -> Verdict:
     prompt = PLAN_PROMPT.replace("{goal}", goal).replace("{plan}", plan)
-    return _run(prompt, cfg, cwd)
+    return _run(prompt, cfg, cwd, confirm_planning=confirm_planning)
 
 
-def review_output(user_prompt: str, agent_name: str, response: str, cfg: dict, cwd: Path | None = None) -> Verdict:
+def review_output(
+    user_prompt: str, agent_name: str, response: str, cfg: dict,
+    cwd: Path | None = None,
+    confirm_planning: PlanningChoiceFn | None = None,
+) -> Verdict:
     prompt = (
         OUTPUT_PROMPT
         .replace("{prompt}", user_prompt)
         .replace("{agent}", agent_name)
         .replace("{response}", response[:8000])  # cap to keep token cost sane
     )
-    return _run(prompt, cfg, cwd)
+    return _run(prompt, cfg, cwd, confirm_planning=confirm_planning)
 
 
 def _extract_json(text: str) -> dict | None:

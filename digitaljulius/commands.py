@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from digitaljulius import ui
-from digitaljulius.agents.registry import get_agent
+from digitaljulius import secrets, ui
+from digitaljulius.agents.registry import AGENTS, get_agent
 from digitaljulius.auth import (
     instructions_for,
     interactive_login,
@@ -17,6 +17,7 @@ from digitaljulius.budget import best_available_model
 from digitaljulius.complexity import Tier, classify
 from digitaljulius.config import CONFIG_PATH, save_config
 from digitaljulius.knowledge import KB_FILES, all_entries, forget, learn
+from digitaljulius.log import log_path
 from digitaljulius.self_modify import SelfModResult, reinstall, self_modify
 
 
@@ -198,12 +199,304 @@ def _cmd_spawn(ctx, *args) -> None:
     ui.info(f"pinned to {agent} — next prompts go straight to it. /spawn off to unpin")
 
 
-def _cmd_log(ctx) -> None:
+def _cmd_switch(ctx, *args) -> None:
+    """/switch                        — show available agents + current pin
+    /switch <agent>                — pin every prompt to this agent
+    /switch <agent> <model>        — pin agent and persist the model choice
+    /switch off                    — unpin (return to auto-routing)
+    """
+    cfg = ctx["cfg"]
+
+    if not args:
+        pinned = ctx.get("pinned_agent") or "(auto-routing)"
+        ui.console.print(f"[bold]current:[/bold] [magenta]{pinned}[/magenta]")
+        ui.console.print("[bold cyan]available agents:[/bold cyan]")
+        for name, ac in cfg["agents"].items():
+            try:
+                adapter = get_agent(name)
+            except KeyError:
+                continue
+            installed = adapter.is_installed()
+            authed = installed and adapter.is_authenticated()
+            top = best_available_model(cfg, name) or "[red]exhausted[/red]"
+            tag = "[green]✓[/green]" if authed else "[red]✗[/red]"
+            ui.console.print(
+                f"  {tag} [magenta]{name}[/magenta]  "
+                f"top: [cyan]{top}[/cyan]  "
+                f"[dim]chain: {' → '.join(ac.get('fallback_chain', []))}[/dim]"
+            )
+        ui.console.print(
+            "[dim]usage: /switch <agent> [model]  •  /switch off to unpin[/dim]"
+        )
+        return
+
+    if args[0].lower() in {"off", "auto", "none"}:
+        ctx.pop("pinned_agent", None)
+        ui.info("switch off — back to auto-routing")
+        return
+
+    agent = args[0]
+    if agent not in cfg["agents"]:
+        ui.error(f"unknown agent: {agent}")
+        return
+    try:
+        adapter = get_agent(agent)
+    except KeyError:
+        ui.error(f"unknown agent: {agent}")
+        return
+    if not adapter.is_installed():
+        ui.error(f"{agent} CLI not installed — `dj --login` or check `/auth`")
+        return
+    if not adapter.is_authenticated():
+        ui.error(f"{agent} not authenticated — run `/auth {agent}`")
+        return
+
+    ctx["pinned_agent"] = agent
+
+    if len(args) >= 2:
+        model = args[1]
+        cfg["agents"][agent]["top_model"] = model
+        chain = cfg["agents"][agent].setdefault("fallback_chain", [])
+        if model not in chain:
+            chain.insert(0, model)
+        save_config(cfg)
+        ui.info(f"pinned to [magenta]{agent}[/magenta] · [cyan]{model}[/cyan] (saved)")
+    else:
+        top = best_available_model(cfg, agent) or "exhausted"
+        ui.info(f"pinned to [magenta]{agent}[/magenta] · top model [cyan]{top}[/cyan]")
+
+
+def _cmd_log(ctx, *args) -> None:
+    """/log              — show this session's turns
+    /log file         — print the runtime log file path
+    /log tail [N]     — show last N (default 30) lines of the runtime log
+    """
+    sub = (args[0].lower() if args else "")
+    if sub == "file":
+        lp = log_path()
+        if lp:
+            ui.console.print(f"runtime log: [cyan]{lp}[/cyan]")
+        else:
+            ui.warn("logging not initialised")
+        return
+    if sub == "tail":
+        lp = log_path()
+        if not lp or not lp.exists():
+            ui.warn("no runtime log yet")
+            return
+        try:
+            n = int(args[1]) if len(args) > 1 else 30
+        except ValueError:
+            n = 30
+        try:
+            lines = lp.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]
+        except OSError as e:
+            ui.error(f"could not read log: {e}")
+            return
+        for line in lines:
+            ui.console.print(f"  [dim]{line}[/dim]")
+        return
+
     session = ctx.get("session")
     if session is None:
         ui.warn("no session active")
         return
     ui.render_log(session.turns)
+
+
+def _cmd_openai(ctx, *args) -> None:
+    """/openai                   — show status (key set? top model? credits hint)
+    /openai set-key <KEY>     — store OPENAI_API_KEY in the secret vault
+    /openai model <MODEL>     — pin OpenAI's top_model (e.g. gpt-5, gpt-5-pro, o3-pro)
+    /openai test              — fire a tiny ping at OpenAI to verify the key
+    """
+    cfg = ctx["cfg"]
+    sub = (args[0].lower() if args else "")
+
+    if not sub:
+        has_key = secrets.has("OPENAI_API_KEY") or bool(__import__("os").environ.get("OPENAI_API_KEY"))
+        oa = cfg.get("agents", {}).get("openai", {})
+        cx = cfg.get("agents", {}).get("codex", {})
+        ui.console.print("[bold cyan]OpenAI status[/bold cyan]")
+        ui.console.print(f"  key set:    {'[green]yes[/green]' if has_key else '[red]no[/red]'}  "
+                         f"[dim](secret OPENAI_API_KEY)[/dim]")
+        ui.console.print(f"  top model:  [cyan]{oa.get('top_model', '?')}[/cyan]")
+        ui.console.print(f"  fallback:   [dim]{' → '.join(oa.get('fallback_chain', []))}[/dim]")
+        ui.console.print(f"  best now:   [cyan]{best_available_model(cfg, 'openai') or 'exhausted'}[/cyan]")
+        ui.console.print()
+        ui.console.print("[bold cyan]Codex CLI[/bold cyan]")
+        try:
+            adapter = get_agent("codex")
+            installed = adapter.is_installed()
+            authed = installed and adapter.is_authenticated()
+        except Exception:
+            installed = authed = False
+        ui.console.print(f"  installed:  {'[green]yes[/green]' if installed else '[red]no[/red]'}")
+        ui.console.print(f"  authed:     {'[green]yes[/green]' if authed else '[yellow]no[/yellow]'}")
+        ui.console.print(f"  top model:  [cyan]{cx.get('top_model', '?')}[/cyan]")
+        ui.console.print(f"  fallback:   [dim]{' → '.join(cx.get('fallback_chain', []))}[/dim]")
+        ui.console.print()
+        ui.console.print("[dim]usage: /openai set-key <KEY>  •  /openai model <MODEL>  •  /openai test[/dim]")
+        return
+
+    if sub == "set-key":
+        if len(args) < 2:
+            ui.warn("usage: /openai set-key <YOUR_OPENAI_API_KEY>")
+            return
+        key = args[1].strip()
+        if not key.startswith("sk-"):
+            ui.warn("key doesn't start with `sk-` — saving anyway, but double-check it")
+        secrets.set_("OPENAI_API_KEY", key)
+        ui.info("OPENAI_API_KEY stored in ~/.digitaljulius/secrets.json (chmod 600)")
+        return
+
+    if sub == "model":
+        if len(args) < 2:
+            ui.warn("usage: /openai model <MODEL>")
+            return
+        model = args[1]
+        cfg["agents"]["openai"]["top_model"] = model
+        chain = cfg["agents"]["openai"].setdefault("fallback_chain", [])
+        if model not in chain:
+            chain.insert(0, model)
+        save_config(cfg)
+        ui.info(f"openai top_model set to [cyan]{model}[/cyan] (saved)")
+        return
+
+    if sub == "test":
+        adapter = get_agent("openai")
+        if not adapter.is_authenticated():
+            ui.error("no key — run `/openai set-key <KEY>` first")
+            return
+        model = cfg["agents"]["openai"].get("top_model", "gpt-5")
+        ui.info(f"pinging openai · {model}…")
+        resp = adapter.run("Reply with the single word: pong", model=model, timeout=30)
+        if resp.ok:
+            ui.info(f"OK ({resp.duration_s:.1f}s) — {resp.text[:120]}")
+        else:
+            ui.error(f"failed: {resp.stderr[:300]}")
+        return
+
+    ui.warn(f"unknown subcommand: /openai {sub} — try /openai with no args")
+
+
+def _cmd_audit(ctx, *args) -> None:
+    """/audit [agent] [text-or-last]  — full Claude<->OpenAI cross-critique.
+
+      /audit               — auditor critiques the last turn, then the
+                             original author rebuts. Two turns total.
+      /audit openai        — force openai as auditor on last turn
+      /audit codex <text>  — pipe explicit text to codex for critique
+
+    Implements a 2-turn cross-critique:
+      1) auditor reads original prompt + author's reply, returns critique
+      2) original author reads critique, returns rebuttal/revision
+    """
+    session = ctx.get("session")
+    if not session or not session.turns:
+        ui.warn("no previous turn in this session to audit")
+        return
+    last = session.turns[-1]
+    target = args[0].lower() if args else None
+
+    # Default pair: if last turn was claude, audit with openai; else audit with claude.
+    author = (last.chosen_agent or "").lower()
+    if target is None:
+        target = "openai" if author == "claude" else "claude"
+
+    if target not in AGENTS:
+        ui.error(f"unknown agent: {target} — choose one of {list(AGENTS)}")
+        return
+    auditor_adapter = get_agent(target)
+    if not (auditor_adapter.is_installed() and auditor_adapter.is_authenticated()):
+        ui.error(f"{target} is not authenticated — run /auth or /openai set-key")
+        return
+
+    extra = " ".join(args[1:]).strip()
+    text_to_audit = extra or last.final_text or ""
+    if not text_to_audit:
+        ui.warn("nothing to audit — last turn had no final_text")
+        return
+
+    cfg = ctx["cfg"]
+    cwd = ctx["cwd"]
+
+    # ---- Turn 1: auditor critiques ----
+    audit_prompt = (
+        f"You are auditing another AI agent's response.\n"
+        f"Original user prompt: {last.prompt!r}\n"
+        f"Author: {last.chosen_agent or 'unknown'} ({last.chosen_model or '?'})\n\n"
+        f"Their response:\n---\n{text_to_audit}\n---\n\n"
+        f"Critique: 1) factual errors, 2) logic gaps, 3) anything you'd do "
+        f"differently. Be terse — bullets only. End with VERDICT: SOUND / "
+        f"CONCERNS / WRONG."
+    )
+    auditor_model = (
+        best_available_model(cfg, target) or cfg["agents"][target].get("top_model")
+    )
+    ui.info(f"[1/2] auditing with [magenta]{target}[/magenta] · "
+            f"[cyan]{auditor_model}[/cyan]…")
+    audit_resp = auditor_adapter.run(audit_prompt, model=auditor_model,
+                                     timeout=120, cwd=cwd)
+    if not audit_resp.ok:
+        ui.error(audit_resp.stderr[:400] or "audit failed")
+        return
+    ui.console.print(f"\n[bold]Audit by {target}:[/bold]")
+    ui.render_response(audit_resp.text)
+
+    # ---- Turn 2: original author rebuts ----
+    if not author or author not in AGENTS:
+        ui.warn("can't run rebuttal — original author unknown")
+        return
+    if author == target:
+        ui.info("auditor == author, skipping rebuttal")
+        return
+    try:
+        author_adapter = get_agent(author)
+    except KeyError:
+        return
+    if not (author_adapter.is_installed() and author_adapter.is_authenticated()):
+        ui.warn(f"original author {author} not available for rebuttal — skipping")
+        return
+
+    rebuttal_prompt = (
+        f"You ({author}) previously answered this prompt:\n"
+        f"---\n{last.prompt}\n---\n\n"
+        f"Your answer was:\n---\n{text_to_audit}\n---\n\n"
+        f"Another agent ({target}) audited it:\n---\n{audit_resp.text}\n---\n\n"
+        f"Respond: which critiques are correct? Which are wrong or off-base? "
+        f"If anything in your original answer needs revision, output the "
+        f"revised version. Terse. End with FINAL: ACCEPT-ALL / ACCEPT-PARTIAL / "
+        f"REJECT (with one-line reason)."
+    )
+    rebut_model = (
+        best_available_model(cfg, author) or cfg["agents"][author].get("top_model")
+    )
+    ui.info(f"[2/2] rebuttal from [magenta]{author}[/magenta] · "
+            f"[cyan]{rebut_model}[/cyan]…")
+    rebut_resp = author_adapter.run(rebuttal_prompt, model=rebut_model,
+                                    timeout=120, cwd=cwd)
+    if rebut_resp.ok:
+        ui.console.print(f"\n[bold]Rebuttal by {author}:[/bold]")
+        ui.render_response(rebut_resp.text)
+    else:
+        ui.warn(f"rebuttal failed: {rebut_resp.stderr[:200]}")
+
+
+def _cmd_plan(ctx, *args) -> None:
+    """/plan <prompt> — force plan-then-execute mode for this prompt.
+
+    Drafts a structured plan via the top-tier planner first, shows it with
+    a +/- expand toggle, you approve/edit/abort, then it's executed.
+    """
+    text = " ".join(args).strip()
+    if not text:
+        ui.warn("usage: /plan <prompt> — forces plan-first even on simple tasks")
+        return
+    ctx["force_plan_first"] = True
+    ctx["pending_prompt"] = text
+    ctx["force_plan_run"] = True
+    ui.info("plan-first mode armed for next prompt — running now…")
 
 
 def _cmd_init(ctx) -> None:
@@ -328,13 +621,17 @@ REGISTRY: dict[str, SlashCmd] = {
     "route":     SlashCmd("route",     "classify a prompt without running it",          _cmd_route),
     "best":      SlashCmd("best",      "show top available model per agent",            _cmd_best),
     "model":     SlashCmd("model",     "/model <agent> <model> — pin top model",        _cmd_model),
-    "consensus": SlashCmd("consensus", "/consensus <prompt> — force 3-agent vote",      _cmd_consensus),
+    "consensus": SlashCmd("consensus", "/consensus <prompt> — force 3-agent vote",      _cmd_consensus),      
     "spawn":     SlashCmd("spawn",     "/spawn <agent> — pin all prompts to one agent", _cmd_spawn),
-    "log":       SlashCmd("log",       "show this session's turns",                     _cmd_log),
+    "switch":    SlashCmd("switch",    "alias for /spawn; /switch shows available",     _cmd_switch),
+    "log":       SlashCmd("log",       "/log [file|tail N] — turns, log path, or tail", _cmd_log),
+    "openai":    SlashCmd("openai",    "/openai [set-key|model|test] — manage secondary boss", _cmd_openai),
+    "audit":     SlashCmd("audit",     "/audit [agent] — 2-turn cross-critique (auditor + rebuttal)", _cmd_audit),
+    "plan":      SlashCmd("plan",      "/plan <prompt> — force plan-then-execute with +/- expand toggle", _cmd_plan),
     "init":      SlashCmd("init",      "write a starter PROJECT.md in cwd",             _cmd_init),
     "yolo":      SlashCmd("yolo",      "/yolo on|off — toggle skip-permissions",        _cmd_yolo),
     "learn":     SlashCmd("learn",     "/learn [kind] <text> — save a lesson",          _cmd_learn),
-    "knowledge": SlashCmd("knowledge", "show accumulated lessons",                      _cmd_knowledge),
+    "knowledge": SlashCmd("knowledge", "show accumulated lessons",                      _cmd_knowledge),        
     "forget":    SlashCmd("forget",    "/forget <needle> — drop matching lessons",      _cmd_forget),
     "self":      SlashCmd("self",      "/self <instruction> — edit DigitalJulius itself", _cmd_self),
     "clear":     SlashCmd("clear",     "clear the screen",                              _cmd_clear),
@@ -354,6 +651,10 @@ def dispatch(line: str, ctx: dict) -> bool:
         ctx.pop("pinned_agent", None)
         ui.info("spawn unpinned")
         return True
+    if name == "switch" and args and args[0] == "off":
+        ctx.pop("pinned_agent", None)
+        ui.info("switch unpinned")
+        return True
     cmd = REGISTRY.get(name)
     if not cmd:
         ui.error(f"unknown command: /{name}. try /help")
@@ -367,4 +668,4 @@ def dispatch(line: str, ctx: dict) -> bool:
 
 
 def command_names() -> list[str]:
-    return [f"/{c}" for c in REGISTRY] + ["/spawn off"]
+    return [f"/{c}" for c in REGISTRY] + ["/spawn off", "/switch off"]

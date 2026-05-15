@@ -55,7 +55,7 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
 
 PLAN_PROMPT = """You are about to modify the source code of DigitalJulius
 itself. DigitalJulius is a Python orchestrator that routes prompts across
-Claude Code, Gemini CLI, and Qwen Code.
+Claude Code, Gemini CLI, and GitHub Models.
 
 Repo root: {repo}
 Package: digitaljulius/

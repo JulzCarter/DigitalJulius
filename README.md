@@ -1,6 +1,6 @@
 # DigitalJulius
 
-> **A meta-orchestrator that routes one prompt across Claude Code, Gemini CLI, and Qwen Code — picks the best agent(s), runs them headlessly, uses Claude Opus to approve plans and review outputs, and steps down tiers when free-tier quotas run low.**
+> **A meta-orchestrator that routes one prompt across Claude Code, Gemini CLI, and GitHub Models — picks the best agent(s), runs them headlessly, uses Claude Opus to approve plans and review outputs, and steps down tiers when free-tier quotas run low.**
 
 Built to maximize **accuracy, cost-efficiency, and speed** by combining three already-installed agentic coders behind a single TUI.
 
@@ -16,7 +16,7 @@ You give DigitalJulius one prompt. It:
    - `MODERATE` → one agent + Claude reviews the output
    - `COMPLEX`  → two agents propose in parallel + Claude synthesizes
    - `CRITICAL` → asks you for opt-in to spawn a third "twin" instance
-3. **Approves plans** before execution and **reviews outputs** after, using Claude Opus as the gatekeeper.
+3. **Approves plans** before execution and **reviews outputs** after, using Claude Opus as the gatekeeper.      
 4. **Tracks per-agent daily quota** and **auto-steps down** to lower tiers as free-tier limits approach (same pattern as Gemini's quota_guard hook).
 5. **Logs everything** to the shared `.shared-agent-context/SESSION_LOG.md` so any agent picking up later sees the full history.
 
@@ -36,7 +36,7 @@ This exposes two commands: `digitaljulius` (the full name) and `dj` (short alias
 dj
 ```
 
-On first launch, DigitalJulius probes Claude Code, Gemini CLI, and Qwen Code for valid credentials. If any are missing, it walks you through authenticating each (open a terminal, run `claude` / `gemini` / `qwen` once each — OAuth browser flows take care of the rest, all three have free tiers).
+On first launch, DigitalJulius probes Claude Code, Gemini CLI, and GitHub Models for valid credentials. If any are missing, it walks you through authenticating each (open a terminal, run `claude` / `gemini` / `gh auth login` once each — all three have free tiers).
 
 ## Slash commands
 
@@ -47,6 +47,7 @@ On first launch, DigitalJulius probes Claude Code, Gemini CLI, and Qwen Code for
 /route <agent>     pin next prompts to one agent
 /consensus         force multi-agent consensus on next prompt
 /spawn             escalate to twin instance for next CRITICAL prompt
+/switch <agent>    switch pinned agent
 /best              reset every agent to its top-tier model
 /model <agent>=<model>   override an agent's model
 /log "note"        append a note to the shared SESSION_LOG.md
@@ -89,7 +90,7 @@ SIMPLE        MODERATE       COMPLEX         CRITICAL
 | Mode | Flag | Behavior |
 |---|---|---|
 | Default | _(none)_ | Confirms before risky tool calls. |
-| YOLO | `--yolo` / `-y` | Auto-approves everything. Matches Claude/Gemini/Qwen YOLO. |
+| YOLO | `--yolo` / `-y` | Auto-approves everything. Matches Claude/Gemini/GitHub YOLO. |
 | Plan | `--plan` | Shows the routing plan only, runs nothing. |
 | Headless | `-p "prompt"` | One-shot, prints answer to stdout. |
 

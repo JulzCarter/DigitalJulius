@@ -18,7 +18,7 @@ console = Console()
 def banner() -> None:
     title = Text("DigitalJulius", style="bold cyan")
     sub = Text(
-        "free-tier orchestrator across Claude / Gemini / Qwen",
+        "free-tier orchestrator across Claude / Gemini / GitHub",
         style="dim",
     )
     console.print(Panel.fit(title + Text("\n") + sub, border_style="cyan"))

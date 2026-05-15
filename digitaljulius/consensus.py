@@ -13,6 +13,7 @@ from digitaljulius.agents.base import AgentResponse
 from digitaljulius.agents.registry import get_agent
 from digitaljulius.budget import best_available_model, record_call
 from digitaljulius.events import Reporter, StepEvent, silent
+from digitaljulius.roles import PlanningChoiceFn, resilient_role_call
 
 
 @dataclass
@@ -24,8 +25,9 @@ class ConsensusResult:
 
 
 SYNTH_PROMPT = """You are the synthesiser for a multi-agent orchestrator. Three
-coding agents (Claude, Gemini, Qwen) independently answered the same user
-prompt. Read all candidate answers and produce the single best final answer.
+coding agents (Claude Code, Gemini CLI, GitHub Models) independently answered
+the same user prompt. Read all candidate answers and produce the single best
+final answer.
 
 Rules:
 - Prefer correctness over verbosity.
@@ -111,8 +113,14 @@ def run_consensus(
     return result
 
 
-def synthesise(prompt: str, result: ConsensusResult, cfg: dict, cwd: Path | None = None) -> str:
-    """Ask the approver agent to merge candidate answers into a single reply."""
+def synthesise(
+    prompt: str, result: ConsensusResult, cfg: dict,
+    cwd: Path | None = None,
+    confirm_planning: PlanningChoiceFn | None = None,
+) -> str:
+    """Ask the approver agent to merge candidate answers into a single reply.
+    Synthesis IS a planning role — top-tier only, prompts the user before
+    any downgrade."""
     good = [r for r in result.responses if r.ok and r.text]
     if not good:
         return ""
@@ -134,33 +142,24 @@ def synthesise(prompt: str, result: ConsensusResult, cfg: dict, cwd: Path | None
         .replace("{candidates}", "\n".join(blocks))
     )
 
-    approver_cfg = cfg.get("approver", {})
-    agent_name = approver_cfg.get("agent", "claude")
-    model = approver_cfg.get("model", "opus")
-    try:
-        adapter = get_agent(agent_name)
-    except KeyError:
-        # Fallback: just concatenate.
-        result.synthesis = "\n\n".join(b for b in blocks)
-        return result.synthesis
+    # Prefer the explicit synthesizer role if configured, else fall back to
+    # the approver role (same agent does plan-review and synthesis by default).
+    synth_cfg = cfg.get("synthesizer") or {}
+    if not synth_cfg.get("agent"):
+        synth_cfg = cfg.get("approver", {"agent": "claude", "model": "opus"})
 
-    if not (adapter.is_installed() and adapter.is_authenticated()):
-        # Fallback: pick the longest candidate.
-        best = max(good, key=lambda r: len(r.text))
-        result.chosen_agent = best.agent
-        result.chosen_model = best.model
-        result.synthesis = best.text
-        return best.text
-
-    resp = adapter.run(synth_prompt, model=model, yolo=True, cwd=cwd, timeout=180)
-    record_call(agent_name, model)
-    if resp.ok and resp.text:
-        result.chosen_agent = f"{agent_name}-synth"
-        result.chosen_model = model
+    resp = resilient_role_call(
+        synth_cfg, synth_prompt, cfg, cwd=cwd, timeout=180,
+        planning=True, confirm_planning=confirm_planning,
+    )
+    if resp is not None and resp.ok and resp.text:
+        result.chosen_agent = f"{resp.agent}-synth"
+        result.chosen_model = resp.model
         result.synthesis = resp.text
         return resp.text
 
-    # Last-ditch fallback.
+    # Last-ditch fallback: pick the longest candidate so the user still
+    # gets a usable answer when every synth agent is down.
     best = max(good, key=lambda r: len(r.text))
     result.chosen_agent = best.agent
     result.chosen_model = best.model

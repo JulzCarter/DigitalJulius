@@ -45,6 +45,15 @@ def record_call(agent: str, model: str) -> dict:
     return data
 
 
+def exhaust_model(agent: str, model: str) -> None:
+    """Manually mark a model as exhausted (e.g. after a quota error)."""
+    data = load_budget()
+    k = key(agent, model)
+    # We set it to a high value so usage_pct > switch_pct
+    data["counts"][k] = 9999
+    save_budget(data)
+
+
 def usage_pct(cfg: dict, agent: str, model: str) -> float:
     data = load_budget()
     used = data["counts"].get(key(agent, model), 0)
