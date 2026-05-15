@@ -1,26 +1,18 @@
 # DigitalJulius
 
-> **A meta-orchestrator that routes one prompt across Claude Code, Gemini CLI, and GitHub Models — picks the best agent(s), runs them headlessly, uses Claude Opus to approve plans and review outputs, and steps down tiers when free-tier quotas run low.**
+> Multi-agent orchestrator routing across Claude, OpenAI, Codex, Gemini, and GitHub Models.
 
-Built to maximize **accuracy, cost-efficiency, and speed** by combining three already-installed agentic coders behind a single TUI.
-
----
-
-## What it does
-
-You give DigitalJulius one prompt. It:
-
-1. **Classifies complexity** with a cheap fast model (Gemini Flash, ~1s).
-2. **Routes** to the right agent(s) based on a capability matrix:
-   - `SIMPLE`   → one agent, cheapest viable model
-   - `MODERATE` → one agent + Claude reviews the output
-   - `COMPLEX`  → two agents propose in parallel + Claude synthesizes
-   - `CRITICAL` → asks you for opt-in to spawn a third "twin" instance
-3. **Approves plans** before execution and **reviews outputs** after, using Claude Opus as the gatekeeper.      
-4. **Tracks per-agent daily quota** and **auto-steps down** to lower tiers as free-tier limits approach (same pattern as Gemini's quota_guard hook).
-5. **Logs everything** to the shared `.shared-agent-context/SESSION_LOG.md` so any agent picking up later sees the full history.
+DigitalJulius is a local REPL and one-shot runner that classifies a prompt, picks the right agent stack, drafts plans for non-trivial work, and hands execution to the strongest available worker. v0.2.0 is built around a dual-boss hierarchy: Claude owns orchestration, OpenAI is the secondary boss, Codex handles deep coding, and Gemini/GitHub Models/completion providers fill worker and fallback roles.
 
 ## Install
+
+From PyPI:
+
+```bash
+pipx install digitaljulius
+```
+
+From source:
 
 ```bash
 git clone <repo> DigitalJulius
@@ -28,71 +20,216 @@ cd DigitalJulius
 pip install -e .
 ```
 
-This exposes two commands: `digitaljulius` (the full name) and `dj` (short alias).
+Requires Python 3.11+. Installs both commands:
+
+```bash
+digitaljulius
+dj
+```
 
 ## First run
+
+```bash
+dj --login
+```
+
+The login wizard probes installed agents and walks missing auth in-place:
+
+- Claude Code: run its OAuth flow through the `claude` CLI.
+- OpenAI: paste an API key; stored in `~/.digitaljulius/secrets.json`.
+- Codex: install/login to the `codex` CLI, or set `OPENAI_API_KEY`.
+- Gemini: authenticate the `gemini` CLI.
+- GitHub Models: authenticate `gh` with access to `gh models run`.
+
+You can also fix auth later from the REPL with `/auth`, `/auth <agent>`, or `/openai set-key <KEY>`.
+
+## Quick start
+
+Interactive REPL:
 
 ```bash
 dj
 ```
 
-On first launch, DigitalJulius probes Claude Code, Gemini CLI, and GitHub Models for valid credentials. If any are missing, it walks you through authenticating each (open a terminal, run `claude` / `gemini` / `gh auth login` once each — all three have free tiers).
+One-shot prompt:
 
-## Slash commands
-
-```
-/help              show command list
-/agents            status + auth + quota per agent
-/budget            today's per-agent quota usage
-/route <agent>     pin next prompts to one agent
-/consensus         force multi-agent consensus on next prompt
-/spawn             escalate to twin instance for next CRITICAL prompt
-/switch <agent>    switch pinned agent
-/best              reset every agent to its top-tier model
-/model <agent>=<model>   override an agent's model
-/log "note"        append a note to the shared SESSION_LOG.md
-/init              run `agent-context init` in current dir
-/auth              re-run the auth probe
-/clear             clear scrollback
-/quit              exit
+```bash
+dj -p "summarise this repo"
 ```
 
-## Why this design
+Safe mode: workers run without YOLO / skip-permissions.
 
-- **Shell-out over API.** Each underlying CLI already implements its own agentic tool loop (file edits, MCP servers, etc.). DigitalJulius spawns them with `-p` for headless one-shots and orchestrates the conversation. No reinvented wheels.
-- **Claude as approver.** Of the three, Claude (Opus) is the strongest reasoner. Using it sparingly as a plan-reviewer and output-checker buys quality without burning quota on every prompt.
-- **Local quota tracking.** Free-tier services don't expose remaining-credit APIs. We count requests locally and step down at 90% of known daily caps. Tunable in `~/.digitaljulius/config.toml`.
-- **Shared context.** Every routing decision, plan, and output appends to `.shared-agent-context/SESSION_LOG.md` so individual agent sessions can see what happened when you switch back to running them standalone.
+```bash
+dj --safe -p "make the smallest safe fix for the failing test"
+dj -s -p "explain the architecture"
+```
+
+Other useful flags:
+
+```bash
+dj --cwd D:\path\to\repo
+dj --verbose
+```
 
 ## Architecture
 
-```
-        prompt
-           ↓
-    [classify]  ← Gemini Flash
-           ↓
-   ┌───────┴────────┐
-SIMPLE        MODERATE       COMPLEX         CRITICAL
-  ↓             ↓              ↓                ↓
-1 agent      1 agent         2 agents       opt-in: 3 agents
-              ↓                ↓                ↓
-              ↓          [synthesize]    [synthesize]
-           [review]           ↓                ↓
-              ↓            [review]        [review]
-              ↓             ↓                ↓
-                   ←—— Claude Opus reviews ——→
-                              ↓
-                         render + log
+Default hierarchy:
+
+```text
+Claude (primary boss)
+  -> OpenAI gpt-5 (secondary boss)
+    -> Codex gpt-5-codex (deep coding worker)
+      -> Gemini / GitHub Models / completion providers (workers and fallback)
 ```
 
-## Run modes
+The main loop is:
 
-| Mode | Flag | Behavior |
+1. Classify the prompt into `SIMPLE`, `MODERATE`, `COMPLEX`, or `CRITICAL`.
+2. Pick routing tags and candidate agents from `config.py`.
+3. For `COMPLEX` and `CRITICAL`, draft a plan before execution.
+4. Show the plan collapsed; `+` expands, `-` collapses, `y` approves, `e` edits a step, `n` aborts.
+5. Execute through the selected agent(s).
+6. Review/synthesise with the planning role when the tier requires it.
+7. Fall back across models and agents when quota or auth blocks a route.
+
+Live progress uses a single Rich status spinner with phase labels:
+
+| Phase | Meaning |
+|---|---|
+| 🧠 thinking | classifying complexity and tags |
+| 📋 planning | drafting or reviewing a plan |
+| ⚡ executing | worker agent is running |
+| 🔍 reviewing | approver is checking output |
+| 🧩 synthesising | merging consensus output |
+| 👯 twin | optional second consensus pass |
+| 🧭 routing | selecting/fanning out agents |
+| 📁 progress | reporting file changes found after execution |
+| ⚡ escalate | rotating to the next boss/agent |
+
+If a route rotates mid-turn, the next agent receives a `[CONTEXT HANDOFF]` preamble with the previous agent, model, failure reason, and output snippet.
+
+## Routing tags
+
+These are the default routing tags in `DEFAULT_CONFIG.routing`:
+
+| Tag | Default order | Use |
 |---|---|---|
-| Default | _(none)_ | Confirms before risky tool calls. |
-| YOLO | `--yolo` / `-y` | Auto-approves everything. Matches Claude/Gemini/GitHub YOLO. |
-| Plan | `--plan` | Shows the routing plan only, runs nothing. |
-| Headless | `-p "prompt"` | One-shot, prints answer to stdout. |
+| `architecture` | `claude -> openai -> codex -> gemini -> github` | Architecture and design decisions. |
+| `refactor` | `claude -> openai -> codex -> github -> gemini` | Code reshaping where correctness matters more than speed. |
+| `quick_edit` | `github -> openai -> gemini -> claude -> codex` | Small direct edits and cheap worker tasks. |
+| `long_context` | `claude -> openai -> github -> gemini -> codex` | Large repo/context reads; Claude leads, OpenAI follows. |
+| `web_search` | `openai -> gemini -> claude -> github -> codex` | Fresh external information. |
+| `math` | `openai -> claude -> codex -> gemini -> github` | Calculation and formal reasoning. |
+| `deep_coding` | `codex -> claude -> openai -> gemini -> github` | Complex coding where Codex can use its own coding loop. |
+| `self_modify` | `claude` | Prompts that look like changing DigitalJulius itself. |
+| `default` | `claude -> openai -> codex -> gemini -> github` | General fallback route. |
+
+Meta-modification prompts are detected before the classifier. Requests like "fix your log display", "change your router", or "update DigitalJulius" pin to `self_modify` so Claude handles the source-aware path.
+
+## Slash commands
+
+Current command set from `digitaljulius/commands.py`:
+
+| Command | Syntax | Behavior |
+|---|---|---|
+| `/help` | `/help` | Show this list. |
+| `/agents` | `/agents` | List configured agents, auth, and model status. |
+| `/budget` | `/budget` | Show daily quota usage. |
+| `/auth` | `/auth [agent\|all]` | Probe auth; optionally reset and re-auth one/all agents. |
+| `/route` | `/route <prompt>` | Classify a prompt and show preferred routing without running it. |
+| `/best` | `/best` | Show the top available model for each configured agent. |
+| `/model` | `/model <agent> <model>` | Persist an agent's top model override. |
+| `/consensus` | `/consensus <prompt>` | Force a three-agent consensus-style run. |
+| `/spawn` | `/spawn <agent>` | Pin future prompts to one agent. |
+| `/spawn off` | `/spawn off` | Unpin `/spawn`. |
+| `/switch` | `/switch [agent] [model]` | Show agents, pin an agent, and optionally persist a model. |
+| `/switch off` | `/switch off` | Return to auto-routing. |
+| `/log` | `/log` | Show this REPL session's turns. |
+| `/log file` | `/log file` | Print the runtime log path. |
+| `/log tail` | `/log tail [N]` | Show the last N runtime log lines; default 30. |
+| `/openai` | `/openai` | Show OpenAI key/model status and Codex CLI status. |
+| `/openai set-key` | `/openai set-key <KEY>` | Store `OPENAI_API_KEY` in the secret vault. |
+| `/openai model` | `/openai model <MODEL>` | Persist OpenAI's top model. |
+| `/openai test` | `/openai test` | Send a tiny ping to verify the OpenAI key. |
+| `/audit` | `/audit [agent] [text-or-last]` | Run a 2-turn cross-critique: auditor critique, original author rebuttal. |
+| `/plan` | `/plan <prompt>` | Force plan-then-execute for this prompt. |
+| `/init` | `/init` | Write `./.digitaljulius/PROJECT.md` if missing. |
+| `/yolo` | `/yolo on\|off` | Toggle skip-permissions mode for worker runs. |
+| `/learn` | `/learn [kind] <text>` | Save a lesson. Kinds: `learned`, `preferences`, `routing`, `failures`. |
+| `/knowledge` | `/knowledge` | Show accumulated lessons. |
+| `/forget` | `/forget <needle>` | Remove saved lessons matching text. |
+| `/self` | `/self <instruction>` | Let DigitalJulius plan and apply a self-modification. |
+| `/clear` | `/clear` | Clear the screen. |
+| `/quit` | `/quit` | Exit the REPL. |
+
+There is no `/providers`, `/quota`, `/next`, or `/openai`-only shortcut beyond the commands above in v0.2.0.
+
+## Configuration
+
+Main config is written to:
+
+```text
+~/.digitaljulius/config.toml
+```
+
+It holds enabled agents, model fallback chains, budget caps, routing tables, role assignments, and memory limits. Existing configs are migrated on load: retired `qwen` references are removed, OpenAI/Codex defaults are backfilled, and stale long-context or role assignments are corrected.
+
+Runtime logs:
+
+```text
+~/.digitaljulius/logs/digitaljulius.log
+~/.digitaljulius/logs/session_<timestamp>.jsonl
+```
+
+`digitaljulius.log` is a rotating Python log: 5 MB x 5 backups. Session JSONL logs record final per-turn outcomes for the current REPL session.
+
+Secrets:
+
+```text
+~/.digitaljulius/secrets.json
+```
+
+Secrets are written atomically via temp-file replace. If the file cannot be parsed, DigitalJulius refuses to write until you back it up/remove it. Environment variables named `DJ_SECRET_<NAME>` override vault entries.
+
+## Providers
+
+Built-in agent names are reserved:
+
+```text
+claude, openai, codex, gemini, github
+```
+
+Completion providers are text-in/text-out providers used by role calls and fallback paths. User providers live in:
+
+```text
+~/.digitaljulius/providers.toml
+```
+
+Supported completion adapters include Anthropic, OpenAI-compatible endpoints, and Ollama. Built-in recipes exist for `anthropic-api`, `openai`, `openrouter`, `groq`, `deepseek`, `together`, `mistralai`, and `ollama`. Do not name a custom provider the same as a built-in agent; collisions are rejected or ignored.
+
+## Project context
+
+On each run, DigitalJulius auto-loads project memory from the current working directory when present:
+
+```text
+.digitaljulius/PROJECT.md
+.shared-agent-context/CURRENT_CONTEXT.md
+.shared-agent-context/DECISIONS.md
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+```
+
+The block is capped and prepended as repo context, not treated as the user's latest prompt. `/init` creates a starter `.digitaljulius/PROJECT.md`.
+
+## Safety notes
+
+- Default CLI flag behavior is YOLO on unless `--safe` is passed.
+- `dj --safe` / `dj -s` runs workers without YOLO / skip-permissions.
+- `/yolo on|off` toggles the mode inside the REPL.
+- Launching from home or a filesystem/drive root prints a cwd guard warning, because YOLO workers may scan unrelated projects from there.
+- Plan-first runs do not silently downgrade top-tier planning models. If top-tier planners are exhausted, the REPL asks you to pick a lower-tier planner or abort.
 
 ## License
+
 MIT — see [LICENSE](LICENSE).
