@@ -9,6 +9,7 @@ moment Claude credits run out.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -20,6 +21,7 @@ from digitaljulius.core_directives import (
     top_tier_planning_chain,
 )
 from digitaljulius.log import get_logger
+from digitaljulius.providers import get_provider, list_providers
 
 log = get_logger(__name__)
 
@@ -33,6 +35,36 @@ PlanningChoiceFn = Callable[[list[tuple[str, str]]], "tuple[str, str] | None"]
 # can't authenticate this session). We keep paying ~10s per call to retry
 # these otherwise. Cleared when the process exits.
 SESSION_SKIP: set[str] = set()
+
+
+@dataclass(frozen=True)
+class RoleHandle:
+    name: str
+    adapter: object
+    budget_name: str
+
+    def run(
+        self,
+        prompt: str,
+        model: str,
+        yolo: bool = True,
+        cwd: Path | None = None,
+        timeout: int = 120,
+    ) -> AgentResponse:
+        return self.adapter.run(prompt, model=model, yolo=yolo, cwd=cwd, timeout=timeout)
+
+
+def resolve_role(role_cfg: dict) -> RoleHandle:
+    """Resolve a role config through completion providers, then agents."""
+    name = role_cfg.get("agent", "")
+    if not name:
+        raise KeyError("role config has no agent")
+    try:
+        adapter = get_provider(name)
+    except KeyError:
+        adapter = get_agent(name)
+    budget_name = f"provider:{name}" if getattr(adapter, "kind", "") == "completion" else name
+    return RoleHandle(name=name, adapter=adapter, budget_name=budget_name)
 
 
 def mark_session_skip(agent_name: str, reason: str = "") -> None:
@@ -77,16 +109,20 @@ def _try_agent_chain(
     """Try `preferred_model` then keep walking the agent's fallback chain on
     quota errors. Returns None when this agent has no usable model OR has
     already been marked as broken for this session (folder-trust etc)."""
-    if agent_name in SESSION_SKIP:
-        return None
     try:
-        adapter = get_agent(agent_name)
+        handle = resolve_role({"agent": agent_name})
     except KeyError:
         return None
+    if handle.budget_name in SESSION_SKIP:
+        return None
+    adapter = handle.adapter
     if not (adapter.is_installed() and adapter.is_authenticated()):
         return None
 
-    chain = cfg.get("agents", {}).get(agent_name, {}).get("fallback_chain") or []
+    if getattr(adapter, "kind", "") == "completion":
+        chain = getattr(adapter, "fallback_chain", []) or []
+    else:
+        chain = cfg.get("agents", {}).get(agent_name, {}).get("fallback_chain") or []
     models_to_try: list[str] = []
     if preferred_model:
         models_to_try.append(preferred_model)
@@ -96,19 +132,19 @@ def _try_agent_chain(
 
     for model in models_to_try:
         # Skip already-exhausted models.
-        if not best_available_model_for_specific(cfg, agent_name, model):
+        if not best_available_model_for_specific(cfg, handle.budget_name, model):
             continue
-        resp = adapter.run(prompt, model=model, yolo=True, cwd=cwd, timeout=timeout)
+        resp = handle.run(prompt, model=model, yolo=True, cwd=cwd, timeout=timeout)
         if resp.ok and resp.text:
-            record_call(agent_name, model)
+            record_call(handle.budget_name, model)
             return resp
         if _looks_like_quota(resp, adapter):
-            exhaust_model(agent_name, model)
+            exhaust_model(handle.budget_name, model)
             continue
         if _is_soft_skip(resp):
             # E.g. Gemini "folder not trusted" — bail out for this whole
             # session so we stop paying 10s per prompt retrying it.
-            mark_session_skip(agent_name, "environment-not-supported")
+            mark_session_skip(handle.budget_name, "environment-not-supported")
             return resp
         # Non-quota failure — surface it; caller may try a different agent.
         return resp
@@ -120,6 +156,15 @@ def best_available_model_for_specific(cfg: dict, agent: str, model: str) -> bool
     from digitaljulius.budget import usage_pct
     switch = float(cfg["budget"]["switch_pct"])
     return usage_pct(cfg, agent, model) < switch
+
+
+def _best_available_provider_model(cfg: dict, handle: RoleHandle) -> str | None:
+    switch = float(cfg["budget"]["switch_pct"])
+    from digitaljulius.budget import usage_pct
+    for model in getattr(handle.adapter, "fallback_chain", []) or []:
+        if usage_pct(cfg, handle.budget_name, model) < switch:
+            return model
+    return None
 
 
 def resilient_role_call(
@@ -161,14 +206,20 @@ def resilient_role_call(
         if resp and resp.ok and resp.text:
             return resp
 
-    # Cross-agent fallback — any authenticated agent that has quota left.
-    for agent_name in AGENTS:
+    # Cross-provider fallback — any authenticated agent or completion provider
+    # that has quota left. Built-in agent names remain authoritative.
+    for agent_name, adapter in list_providers().items():
         if agent_name in tried:
             continue
-        agent_cfg = cfg.get("agents", {}).get(agent_name, {})
-        if not agent_cfg.get("enabled", True):
-            continue
-        model = best_available_model(cfg, agent_name)
+        is_completion = getattr(adapter, "kind", "") == "completion"
+        if is_completion:
+            handle = RoleHandle(agent_name, adapter, f"provider:{agent_name}")
+            model = _best_available_provider_model(cfg, handle)
+        else:
+            agent_cfg = cfg.get("agents", {}).get(agent_name, {})
+            if not agent_cfg.get("enabled", True):
+                continue
+            model = best_available_model(cfg, agent_name)
         if not model:
             continue
         resp = _try_agent_chain(agent_name, model, prompt, cwd, timeout, cfg)
