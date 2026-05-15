@@ -11,9 +11,10 @@ from pathlib import Path
 
 from digitaljulius.agents.base import AgentResponse
 from digitaljulius.agents.registry import get_agent
-from digitaljulius.budget import best_available_model, record_call
-from digitaljulius.events import Reporter, StepEvent, silent
+from digitaljulius.budget import best_available_model
+from digitaljulius.events import Reporter, silent
 from digitaljulius.roles import PlanningChoiceFn, resilient_role_call
+from digitaljulius.single_agent import _single_agent_run
 
 
 @dataclass
@@ -49,27 +50,12 @@ write the answer."""
 
 def _call(
     agent_name: str,
-    model: str,
     prompt: str,
+    cfg: dict,
     cwd: Path | None,
     on_event: Reporter,
 ) -> AgentResponse:
-    import time
-    adapter = get_agent(agent_name)
-    on_event(StepEvent(
-        kind="agent_start", label=f"{agent_name} generating",
-        agent=agent_name, model=model,
-    ))
-    t0 = time.time()
-    resp = adapter.run(prompt, model=model, yolo=True, cwd=cwd, timeout=300)
-    record_call(agent_name, model)
-    on_event(StepEvent(
-        kind="agent_done" if resp.ok else "agent_fail",
-        label=f"{agent_name} {'done' if resp.ok else 'failed'}",
-        agent=agent_name, model=model, duration_s=time.time() - t0,
-        note="" if resp.ok else (resp.stderr or "")[:200],
-    ))
-    return resp
+    return _single_agent_run(prompt, agent_name, cfg, cwd, on_event)
 
 
 def run_consensus(
@@ -97,7 +83,7 @@ def run_consensus(
 
     with ThreadPoolExecutor(max_workers=len(plan)) as pool:
         futures = {
-            pool.submit(_call, agent, model, prompt, cwd, on_event): (agent, model)
+            pool.submit(_call, agent, prompt, cfg, cwd, on_event): (agent, model)
             for agent, model in plan
         }
         for fut in as_completed(futures):

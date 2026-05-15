@@ -25,7 +25,7 @@ from typing import Callable
 from digitaljulius.agents.base import AgentResponse
 from digitaljulius.agents.registry import get_agent
 from digitaljulius.approver import Verdict, review_output, review_plan
-from digitaljulius.budget import best_available_model, exhaust_model, record_call
+from digitaljulius.budget import best_available_model
 from digitaljulius.complexity import Classification, Tier, classify
 from digitaljulius.consensus import ConsensusResult, run_consensus, synthesise
 from digitaljulius.core_directives import wrap_for_execution
@@ -35,6 +35,7 @@ from digitaljulius.log import get_logger
 from digitaljulius.planning import Plan, draft_plan, plan_to_worker_prefix
 from digitaljulius.progress_reporter import ProgressReporter
 from digitaljulius.roles import PlanningChoiceFn
+from digitaljulius.single_agent import _single_agent_run
 
 log = get_logger(__name__)
 
@@ -94,102 +95,6 @@ def _pick_agents_for(tags: list[str], cfg: dict, max_n: int) -> list[str]:
             if best_available_model(cfg, agent):
                 final.append(agent)
     return final
-
-
-def _looks_like_quota(resp: AgentResponse, adapter) -> bool:
-    """Combine the adapter's own quota detector with generic credit-out
-    heuristics so we catch out-of-credits / insufficient-funds replies even
-    from adapters that don't explicitly implement is_quota_error."""
-    if hasattr(adapter, "is_quota_error") and adapter.is_quota_error(resp):
-        return True
-    blob = ((resp.stderr or "") + " " + (resp.text or "")).lower()
-    needles = (
-        "out of credits", "insufficient credits", "insufficient funds",
-        "credit balance", "credit balance is too low", "credits required",
-        "quota exceeded", "rate limit", "hit your limit", "usage limit",
-        "billing", "payment required", "402 ", "429 ",
-    )
-    return any(n in blob for n in needles)
-
-
-# ---------------------------------------------------------------------------
-# Core: run one agent with same-agent model fallback
-# ---------------------------------------------------------------------------
-
-
-def _single_agent_run(
-    prompt: str,
-    agent: str,
-    cfg: dict,
-    cwd: Path | None,
-    on_event: Reporter,
-) -> AgentResponse:
-    """Run `agent`, falling back through its model chain on quota errors.
-
-    Returns the first successful AgentResponse. If every model in this agent's
-    chain hits quota, returns the last failure with stderr == "QUOTA_EXCEEDED"
-    so the caller can rotate to the next agent.
-    """
-    auto_fallback = cfg.get("general", {}).get("auto_fallback", True)
-    last_resp: AgentResponse | None = None
-
-    while True:
-        model = best_available_model(cfg, agent)
-        if not model:
-            log.info("orchestrator.agent_skip agent=%s reason=all_models_exhausted", agent)
-            on_event(StepEvent(
-                kind="agent_skip", label=f"{agent} skipped",
-                agent=agent, note="all models exhausted for the day",
-            ))
-            return last_resp or AgentResponse(
-                agent=agent, model="-", ok=False, text="",
-                stderr="QUOTA_EXCEEDED",
-            )
-
-        adapter = get_agent(agent)
-        log.info("orchestrator.agent_start agent=%s model=%s prompt_chars=%d",
-                 agent, model, len(prompt))
-        on_event(StepEvent(
-            kind="agent_start", label=f"{agent} generating",
-            agent=agent, model=model,
-        ))
-        t0 = time.time()
-        resp = adapter.run(prompt, model=model, yolo=True, cwd=cwd, timeout=300)
-        dur = time.time() - t0
-
-        if not resp.ok and _looks_like_quota(resp, adapter):
-            log.warning("orchestrator.quota agent=%s model=%s err=%s",
-                        agent, model, (resp.stderr or "")[:160])
-            exhaust_model(agent, model)
-            on_event(StepEvent(
-                kind="agent_fail", label=f"{agent} quota/credits hit",
-                agent=agent, model=model, duration_s=dur,
-                note=f"falling back to next model in {agent}'s chain",
-            ))
-            resp.stderr = "QUOTA_EXCEEDED"
-            last_resp = resp
-            if auto_fallback:
-                continue
-            return resp
-
-        if resp.ok:
-            log.info("orchestrator.agent_done agent=%s model=%s dur=%.1fs out_chars=%d",
-                     agent, model, dur, len(resp.text or ""))
-            record_call(agent, model)
-            on_event(StepEvent(
-                kind="agent_done", label=f"{agent} done",
-                agent=agent, model=model, duration_s=dur,
-            ))
-            return resp
-
-        log.error("orchestrator.agent_fail agent=%s model=%s err=%s",
-                  agent, model, (resp.stderr or "")[:200])
-        on_event(StepEvent(
-            kind="agent_fail", label=f"{agent} failed",
-            agent=agent, model=model, duration_s=dur,
-            note=(resp.stderr or "")[:200],
-        ))
-        return resp
 
 
 def _handoff_preamble(prev_agent: str, prev_model: str, reason: str,
