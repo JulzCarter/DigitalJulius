@@ -54,8 +54,9 @@ def _call(
     cfg: dict,
     cwd: Path | None,
     on_event: Reporter,
+    yolo: bool | None = None,
 ) -> AgentResponse:
-    return _single_agent_run(prompt, agent_name, cfg, cwd, on_event)
+    return _single_agent_run(prompt, agent_name, cfg, cwd, on_event, yolo=yolo)
 
 
 def run_consensus(
@@ -64,6 +65,7 @@ def run_consensus(
     agents: list[str],
     cwd: Path | None = None,
     on_event: Reporter | None = None,
+    yolo: bool | None = None,
 ) -> ConsensusResult:
     """Call each agent in parallel with its best available model."""
     on_event = on_event or silent
@@ -83,7 +85,7 @@ def run_consensus(
 
     with ThreadPoolExecutor(max_workers=len(plan)) as pool:
         futures = {
-            pool.submit(_call, agent, prompt, cfg, cwd, on_event): (agent, model)
+            pool.submit(_call, agent, prompt, cfg, cwd, on_event, yolo): (agent, model)
             for agent, model in plan
         }
         for fut in as_completed(futures):

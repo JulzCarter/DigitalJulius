@@ -127,6 +127,7 @@ def _try_agents_in_order(
     cwd: Path | None,
     on_event: Reporter,
     tags: list[str] | None = None,
+    yolo: bool | None = None,
 ) -> AgentResponse | None:
     """Walk `agents` until one returns a non-quota response. Returns None if
     every agent was exhausted.
@@ -164,7 +165,7 @@ def _try_agents_in_order(
                 attempts,
             ) + prompt
 
-        resp = _single_agent_run(agent_prompt, agent, cfg, cwd, on_event)
+        resp = _single_agent_run(agent_prompt, agent, cfg, cwd, on_event, yolo=yolo)
         if resp.ok:
             log.info("orchestrator.route agent=%s succeeded handoffs=%d",
                      agent, len(attempts))
@@ -226,6 +227,7 @@ def run_prompt(
     confirm_planning: PlanningChoiceFn | None = None,
     review_drafted_plan: PlanReviewFn | None = None,
     force_plan_first: bool = False,
+    yolo: bool | None = None,
 ) -> RunResult:
     """Top-level: classify → (optional) draft+approve plan → execute → review.
 
@@ -325,7 +327,7 @@ def run_prompt(
             result.skipped_reason = "no authenticated agent with quota available"
             return result
 
-        resp = _try_agents_in_order(enriched_prompt, agents, cfg, cwd, on_event, tags)
+        resp = _try_agents_in_order(enriched_prompt, agents, cfg, cwd, on_event, tags, yolo=yolo)
         if resp is None:
             result.skipped_reason = "all agents exhausted for today"
             return result
@@ -425,7 +427,7 @@ def run_prompt(
             result.skipped_reason = "plan blocked by approver"
             return result
 
-    consensus = run_consensus(enriched_prompt, cfg, agents, cwd=cwd, on_event=on_event)
+    consensus = run_consensus(enriched_prompt, cfg, agents, cwd=cwd, on_event=on_event, yolo=yolo)
 
     # If consensus came back empty (everyone hit quota), degrade gracefully
     # to single-agent fallback rather than returning nothing.
@@ -434,13 +436,13 @@ def run_prompt(
             kind="route_done",
             label="consensus empty — degrading to single-agent fallback",
         ))
-        fallback = _try_agents_in_order(enriched_prompt, agents, cfg, cwd, on_event, tags)
+        fallback = _try_agents_in_order(enriched_prompt, agents, cfg, cwd, on_event, tags, yolo=yolo)
         if fallback and fallback.ok:
             consensus.responses.append(fallback)
 
     if twin:
         on_event(StepEvent(kind="twin_start", label="running twin consensus pass"))
-        twin_result = run_consensus(enriched_prompt, cfg, agents, cwd=cwd, on_event=on_event)
+        twin_result = run_consensus(enriched_prompt, cfg, agents, cwd=cwd, on_event=on_event, yolo=yolo)
         consensus.responses.extend(twin_result.responses)
 
     result.consensus = consensus

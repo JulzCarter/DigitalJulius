@@ -234,6 +234,7 @@ _NEW_AGENTS = {"openai", "codex"}
 def _migrate(loaded: dict) -> dict:
     """Drop references to retired agents and refresh agent blocks that look
     like stubs from a partially-completed swap."""
+    loaded.setdefault("general", {}).setdefault("yolo_default", True)
     agents = loaded.get("agents") or {}
     for dead in _REMOVED_AGENTS & set(agents):
         agents.pop(dead, None)

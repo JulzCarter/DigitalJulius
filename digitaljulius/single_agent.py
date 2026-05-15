@@ -33,6 +33,7 @@ def _single_agent_run(
     cfg: dict,
     cwd: Path | None,
     on_event: Reporter,
+    yolo: bool | None = None,
 ) -> AgentResponse:
     """Run `agent`, falling back through its model chain on quota errors.
 
@@ -40,7 +41,9 @@ def _single_agent_run(
     chain hits quota, returns the last failure with stderr == "QUOTA_EXCEEDED"
     so the caller can rotate to the next agent.
     """
-    auto_fallback = cfg.get("general", {}).get("auto_fallback", True)
+    general = cfg.get("general", {})
+    auto_fallback = general.get("auto_fallback", True)
+    resolved_yolo = general.get("yolo_default", True) if yolo is None else yolo
     last_resp: AgentResponse | None = None
 
     while True:
@@ -64,7 +67,7 @@ def _single_agent_run(
             agent=agent, model=model,
         ))
         t0 = time.time()
-        resp = adapter.run(prompt, model=model, yolo=True, cwd=cwd, timeout=300)
+        resp = adapter.run(prompt, model=model, yolo=resolved_yolo, cwd=cwd, timeout=300)
         dur = time.time() - t0
 
         if not resp.ok and _looks_like_quota(resp, adapter):

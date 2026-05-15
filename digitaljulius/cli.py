@@ -483,13 +483,13 @@ def _login_wizard(force: bool = False) -> bool:
     return any(pp.authenticated for pp in final)
 
 
-def _render_run(prompt: str, run_result) -> None:
+def _render_run(prompt: str, run_result, yolo: bool = True) -> None:
     cls = run_result.classification
     ui.status_line(
         agent=run_result.chosen_agent or "-",
         model=run_result.chosen_model or "-",
         tier=cls.tier.value,
-        yolo=True,
+        yolo=yolo,
     )
     if run_result.plan_verdict is not None:
         ui.render_verdict("plan-review", run_result.plan_verdict)
@@ -503,7 +503,13 @@ def _render_run(prompt: str, run_result) -> None:
         ui.warn(run_result.skipped_reason)
 
 
-def _run_single_pinned(prompt: str, agent: str, cfg: dict, cwd: Path) -> None:
+def _run_single_pinned(
+    prompt: str,
+    agent: str,
+    cfg: dict,
+    cwd: Path,
+    yolo: bool | None = None,
+) -> None:
     """Run a prompt with all routing turned off (user pinned this agent).
     Still gets same-agent model fallback so credits-out on opus rolls down
     to sonnet/haiku automatically."""
@@ -511,8 +517,11 @@ def _run_single_pinned(prompt: str, agent: str, cfg: dict, cwd: Path) -> None:
     if not model:
         ui.error(f"{agent} has no models left under quota — try `/switch <other>`")
         return
-    ui.status_line(agent=agent, model=model, tier="PINNED", yolo=True)
-    resp = _single_agent_run(prompt, agent, cfg, cwd, _live_reporter)
+    resolved_yolo = (
+        cfg.get("general", {}).get("yolo_default", True) if yolo is None else yolo
+    )
+    ui.status_line(agent=agent, model=model, tier="PINNED", yolo=resolved_yolo)
+    resp = _single_agent_run(prompt, agent, cfg, cwd, _live_reporter, yolo=yolo)
     if resp.ok:
         ui.render_response(resp.text)
     elif resp.stderr == "QUOTA_EXCEEDED":
@@ -525,7 +534,7 @@ def _run_single_pinned(prompt: str, agent: str, cfg: dict, cwd: Path) -> None:
         ui.error(resp.stderr or "agent failed")
 
 
-def _interactive_loop(cfg: dict, cwd: Path) -> None:
+def _interactive_loop(cfg: dict, cwd: Path, safe_requested: bool = False) -> None:
     session = new_session(cwd)
     history = InMemoryHistory()
     completer = WordCompleter(command_names(), ignore_case=True, sentence=True)
@@ -535,12 +544,14 @@ def _interactive_loop(cfg: dict, cwd: Path) -> None:
         "cfg": cfg,
         "cwd": cwd,
         "session": session,
-        "yolo": True,
+        "yolo": cfg.get("general", {}).get("yolo_default", True),
         "quit": False,
     }
 
     ui.banner()
     ui.info(f"cwd: {cwd}")
+    safe_note = " (--safe)" if safe_requested and not ctx["yolo"] else ""
+    ui.info(f"yolo: {'on' if ctx['yolo'] else 'off'}{safe_note}")
     ui.info("type /help for commands, /quit to exit. Ctrl-D also exits.")
 
     while not ctx["quit"]:
@@ -568,7 +579,7 @@ def _interactive_loop(cfg: dict, cwd: Path) -> None:
             pinned_prompt = line
             if proj_ctx or hist_ctx:
                 pinned_prompt = "\n\n".join(p for p in (proj_ctx, hist_ctx, f"---\nUser prompt:\n{line}") if p)
-            _run_single_pinned(pinned_prompt, pinned, cfg, cwd)
+            _run_single_pinned(pinned_prompt, pinned, cfg, cwd, yolo=ctx.get("yolo"))
             continue
 
         force_plan_first = ctx.pop("force_plan_first", False)
@@ -580,11 +591,12 @@ def _interactive_loop(cfg: dict, cwd: Path) -> None:
                 confirm_planning=_confirm_planning_choice,
                 review_drafted_plan=_review_drafted_plan,
                 force_plan_first=force_plan_first,
+                yolo=ctx.get("yolo"),
             )
         except KeyboardInterrupt:
             ui.warn("interrupted")
             continue
-        _render_run(line, run_result)
+        _render_run(line, run_result, yolo=ctx.get("yolo", True))
         session.append(turn_from_runresult(line, run_result))
 
         # Self-improvement: distill a durable lesson from this turn.
@@ -628,11 +640,12 @@ def _run_plan_first(prompt: str, ctx: dict) -> None:
             confirm_planning=_confirm_planning_choice,
             review_drafted_plan=_review_drafted_plan,
             force_plan_first=True,
+            yolo=ctx.get("yolo"),
         )
     except KeyboardInterrupt:
         ui.warn("interrupted")
         return
-    _render_run(prompt, run_result)
+    _render_run(prompt, run_result, yolo=ctx.get("yolo", True))
     if ctx.get("session"):
         ctx["session"].append(turn_from_runresult(prompt, run_result))
 
@@ -652,8 +665,9 @@ def _run_forced_consensus(prompt: str, ctx: dict) -> None:
         project_context=proj_ctx, history_context=hist_ctx,
         confirm_planning=_confirm_planning_choice,
         review_drafted_plan=_review_drafted_plan,
+        yolo=ctx.get("yolo"),
     )
-    _render_run(prompt, run_result)
+    _render_run(prompt, run_result, yolo=ctx.get("yolo", True))
     if ctx.get("session"):
         ctx["session"].append(turn_from_runresult(prompt, run_result))
 
@@ -662,7 +676,10 @@ def _run(
     prompt: str | None = typer.Option(
         None, "-p", "--prompt", help="run a single prompt headless and exit"
     ),
-    yolo: bool = typer.Option(True, "--yolo/--safe", help="skip permission prompts"),
+    yolo: bool = typer.Option(True, "--yolo", help="skip permission prompts"),
+    safe: bool = typer.Option(
+        False, "--safe", "-s", help="run workers without YOLO/skip-permissions"
+    ),
     cwd: Path | None = typer.Option(None, "--cwd", help="working directory"),
     login: bool = typer.Option(
         False, "--login", help="force the OAuth walkthrough for every agent"
@@ -675,9 +692,10 @@ def _run(
     set_console_verbose(verbose)
     log.info("dj.start prompt=%s verbose=%s cwd=%s",
              "<one-shot>" if prompt else "<interactive>", verbose, cwd or Path.cwd())
+    effective_yolo = yolo and not safe
     cfg = load_config()
     save_config(cfg)  # writes defaults on first run
-    cfg["general"]["yolo_default"] = yolo
+    cfg["general"]["yolo_default"] = effective_yolo
     cfg["general"].setdefault("auto_learn", True)
     ensure_kb()
     work_cwd = (cwd or Path.cwd()).resolve()
@@ -709,11 +727,12 @@ def _run(
             project_context=proj_ctx,
             confirm_planning=_confirm_planning_choice,
             review_drafted_plan=_review_drafted_plan,
+            yolo=effective_yolo,
         )
-        _render_run(prompt, run_result)
+        _render_run(prompt, run_result, yolo=effective_yolo)
         return
 
-    _interactive_loop(cfg, work_cwd)
+    _interactive_loop(cfg, work_cwd, safe_requested=safe)
 
 
 def main() -> None:
